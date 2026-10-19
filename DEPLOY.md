@@ -146,6 +146,14 @@ postgres://  postgres  :  你的密码  @  localhost  :  5432  /  openmaic
 
 ⚠️ **密码里如果有 `@` `:` `/` `#` 这些字符，URL 里必须转义**（`@` 写成 `%40`，`#` 写成 `%23`）。这是最常见的"配置看着没问题但连不上"的原因。密码里带这些符号的话，建议先直接改成一个纯字母数字的密码省事。
 
+⚠️ **不要去 `.env.example` 里找 `DATABASE_URL` 那行来取消注释。** 它长这样：
+
+```env
+# DATABASE_URL=postgres://openmaic:password@postgres:5432/openmaic
+```
+
+注意主机名是 **`postgres`** —— 那是 **Docker 容器的名字**，在你自己机器上根本解析不了，取消注释后只会得到 DNS 报错。**上面那行 `localhost` 的写法才是给本机部署用的，自己写。**
+
 #### ③ 让系统行为和源机器一致的开关
 
 **变量名照抄，值自己填。**
