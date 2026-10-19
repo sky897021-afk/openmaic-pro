@@ -188,16 +188,14 @@ KNOWLEDGE_BASE_EMBEDDING_MODEL=openai:你的嵌入模型名
 ### 第 5 步：启动
 
 ```bash
-pnpm dev
-```
-
-默认端口 **3000**。换端口：
-
-```bash
 pnpm dev -- -p 3003
 ```
 
-看到 `Ready` 就可以访问了：`http://localhost:3000`（或你指定的端口）。
+⚠️ **`-p 3003` 这一段不能省。** `pnpm dev` 不带参数时默认走 **3000**，所以端口必须显式指定 —— 这跟源机器保持一致。
+
+看到 `Ready` 就可以访问了：**`http://localhost:3003`**
+
+（如果你本机 3000 端口空着，其实不带 `-p` 也能跑，但那样就和源机器的端口不一致了，后面所有验证命令的端口也要跟着改 —— 所以**直接照上面这条来，全程用 3003**。）
 
 ---
 
@@ -206,7 +204,7 @@ pnpm dev -- -p 3003
 依次确认这几条，全对说明配置没问题：
 
 ```bash
-curl http://localhost:3000/api/health
+curl http://localhost:3003/api/health
 ```
 
 期望返回类似：
@@ -216,7 +214,7 @@ curl http://localhost:3000/api/health
 ```
 
 ```bash
-curl http://localhost:3000/api/agent/runtime
+curl http://localhost:3003/api/agent/runtime
 ```
 
 期望返回：
@@ -288,7 +286,7 @@ allowedDevOrigins: ['127.0.0.1', '192.168.*.*', '10.*.*.*'],
 本机历史上出现过开发服务器「假死」——端口还在监听、进程还活着、CPU 是 0，但连接上了不返回任何数据。怀疑和「开发服务器运行期间在同一目录执行 `next build`」有关。想验证生产模式，请**另克隆一份到别的目录**去 build。
 
 **4. 改 `.env.local` 之后手动重启服务。**
-Next 会监视这个文件并尝试自我重启，但这个过程不稳定（也是上面那个假死事故的疑似原因之一）。改了配置就自己 Ctrl-C 再 `pnpm dev`。
+Next 会监视这个文件并尝试自我重启，但这个过程不稳定（也是上面那个假死事故的疑似原因之一）。改了配置就自己 Ctrl-C 再 `pnpm dev -- -p 3003`。
 
 **5. 开发模式改配置不需要重新 build。**
 这是开发模式相比生产模式最省事的地方：`NEXT_PUBLIC_*` 这类「构建期变量」在生产模式下必须重新 `pnpm build`，而在开发模式下**重启一下服务就生效**。
