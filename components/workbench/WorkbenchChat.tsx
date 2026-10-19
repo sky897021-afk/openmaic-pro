@@ -74,7 +74,9 @@ import {
 import {
   AtSignButton,
   AttachButton,
+  LibraryButton,
   MaterialChips,
+  MaterialLibraryMenu,
   SkillButton,
   SkillSlashMenu,
   useComposerMaterials,
@@ -321,6 +323,13 @@ export function WorkbenchChat({
    * and typing anything else brings it back.
    */
   const [mentionOpen, setMentionOpen] = useState(false);
+  /**
+   * The material-library picker's request flag — the third menu in the same
+   * box. It has no token in the draft (unlike `@` and `/`), so a plain request
+   * is its whole open state; `resolveComposerMenu` still owns which of the
+   * three is showing.
+   */
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const {
     menu: openMenu,
     slash,
@@ -331,6 +340,7 @@ export function WorkbenchChat({
     slashDismissedOn: slashDismissed,
     mentionDismissedOn: mentionDismissed,
     courseMenuRequested: mentionOpen,
+    libraryMenuRequested: libraryOpen,
     // The `@` keystroke and the `@` button hold the same bar: no courses to
     // name means no menu at all, not an empty one.
     courseMenuAvailable: (navigation?.courseOptions?.length ?? 0) > 0,
@@ -374,7 +384,17 @@ export function WorkbenchChat({
   const openMention = useCallback(() => {
     composerRef.current?.focus();
     setMentionDismissed(null);
+    setLibraryOpen(false);
     setMentionOpen(true);
+  }, []);
+  /**
+   * The library button's way in. Deliberately does NOT take focus: unlike the
+   * `@` picker, this menu owns its own ↑/↓/Enter, so handing the keys to the
+   * textarea would break it.
+   */
+  const openLibrary = useCallback(() => {
+    setMentionOpen(false);
+    setLibraryOpen(true);
   }, []);
   /**
    * A pick names the course for THIS turn, and that is all it does. The trigger
@@ -409,7 +429,10 @@ export function WorkbenchChat({
    * query ended.
    */
   useEffect(() => {
-    if (slash !== null) setMentionOpen(false);
+    if (slash !== null) {
+      setMentionOpen(false);
+      setLibraryOpen(false);
+    }
   }, [slash]);
 
   /**
@@ -419,7 +442,11 @@ export function WorkbenchChat({
    */
   useEffect(() => {
     setMentionOpen(false);
-    return () => setMentionOpen(false);
+    setLibraryOpen(false);
+    return () => {
+      setMentionOpen(false);
+      setLibraryOpen(false);
+    };
   }, [composerOwnerId]);
 
   const live = isComposerLive({ status, pendingSend });
@@ -486,6 +513,7 @@ export function WorkbenchChat({
       pendingCaret.current = next.caret;
       setCaret(next.caret);
       setMentionOpen(false);
+      setLibraryOpen(false);
       setMentionDismissed(next.draft);
       setSlashDismissed(next.draft);
       return next.draft;
@@ -712,6 +740,7 @@ export function WorkbenchChat({
     setSlashDismissed(null);
     setMentionDismissed(null);
     setMentionOpen(false);
+    setLibraryOpen(false);
     const result = await submit(text, selectedMaterials, selectedRefs, selectedCourses);
     if (result.accepted) {
       materials.clear();
@@ -926,6 +955,17 @@ export function WorkbenchChat({
                     onDismiss={closeSkillMenu}
                   />
                 ) : null}
+                {openMenu === 'library' ? (
+                  <MaterialLibraryMenu
+                    title={t('proMode.materialMenuTitle')}
+                    selectedIds={materials.materials.map((m) => m.materialId)}
+                    onPick={(material) => {
+                      materials.addLibraryMaterial(material);
+                      setLibraryOpen(false);
+                    }}
+                    onDismiss={() => setLibraryOpen(false)}
+                  />
+                ) : null}
                 {mentionMenuOpen ? (
                   <CourseMentionMenu
                     id={mentionMenuId}
@@ -977,10 +1017,12 @@ export function WorkbenchChat({
                   className={styles.composer.input}
                 />
                 <div className={styles.composer.actionsLeft}>
-                  {/* Three glyphs, three attachments for a message: a file, a
-                      classroom, a skill. The file opens its picker directly;
-                      the classroom and skill both open the popovers their
-                      keystrokes (`@` / `/`) open. */}
+                  {/* Four glyphs, four attachments for a message: a file, a
+                      classroom, a skill, and a material already in the shared
+                      library. The file opens its picker directly; the classroom
+                      and skill open the popovers their keystrokes (`@` / `/`)
+                      open; the library has no keystroke and opens on the
+                      button alone. */}
                   <AttachButton
                     testId="workbench-attach"
                     disabled={busy || !canSend}
@@ -1000,6 +1042,15 @@ export function WorkbenchChat({
                     disabled={busy || !canSend}
                     label={t('proMode.loadSkill')}
                     onClick={openSkillMenu}
+                  />
+                  <LibraryButton
+                    testId="workbench-library-button"
+                    disabled={busy || !canSend}
+                    label={t('proMode.chooseMaterial')}
+                    // Toggles: this popover has no draft token, so the button is
+                    // the only way back out of it that does not involve the
+                    // keyboard.
+                    onClick={() => (libraryOpen ? setLibraryOpen(false) : openLibrary())}
                   />
                 </div>
                 <div className={styles.composer.actionsRow}>

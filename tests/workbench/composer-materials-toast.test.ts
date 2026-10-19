@@ -3,6 +3,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ComposerMaterials } from '@/components/workbench/compose-extras';
+import type { WorkbenchMaterial } from '@/lib/workbench/session-store';
+import { MAX_COMPOSER_MATERIALS } from '@/lib/workbench/material-upload-scheduling';
 
 const LOCALE_STORAGE_KEY = 'locale';
 
@@ -84,7 +86,11 @@ async function loadModules() {
   };
 }
 
-async function mountComposer(locale: string, fetchImpl: typeof fetch) {
+async function mountComposer(
+  locale: string,
+  fetchImpl: typeof fetch,
+  initialMaterials: readonly WorkbenchMaterial[] = [],
+) {
   vi.stubGlobal('fetch', fetchImpl);
   vi.stubGlobal('localStorage', localStorageStub);
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -104,7 +110,7 @@ async function mountComposer(locale: string, fetchImpl: typeof fetch) {
 
   const sink: { current: ComposerMaterials | null } = { current: null };
   function Harness() {
-    sink.current = modules.useComposerMaterials();
+    sink.current = modules.useComposerMaterials(initialMaterials);
     return null;
   }
 
@@ -301,5 +307,124 @@ describe('composer material upload toasts', () => {
     expect(mounted.errorSpy).not.toHaveBeenCalled();
     resolveRuntime(Response.json({ enabled: false }));
     await runtime;
+  });
+});
+
+describe('picking from the shared material library', () => {
+  let dispose: (() => Promise<void>) | null = null;
+
+  afterEach(async () => {
+    await dispose?.();
+    dispose = null;
+    localStorageStub.clear();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Only the runtime probe is answered; a material POST is a test failure. */
+  function enabledOnlyFetch() {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/agent/runtime')) return Response.json({ enabled: true });
+      throw new Error(`unexpected fetch ${url}`);
+    });
+  }
+
+  function libraryMaterial(id: string): WorkbenchMaterial {
+    return { materialId: id, name: `${id}.md`, bytes: 10, mimeType: 'text/markdown' };
+  }
+
+  async function mountEnabled(initialMaterials: readonly WorkbenchMaterial[] = []) {
+    const mounted = await mountComposer('en-US', enabledOnlyFetch(), initialMaterials);
+    dispose = mounted.dispose;
+    await mounted.act(async () => {
+      await vi.waitFor(() => expect(mounted.sink.current?.enabled).toBe(true));
+    });
+    return mounted;
+  }
+
+  it('attaches without running an upload', async () => {
+    const mounted = await mountEnabled();
+
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_a'));
+    });
+
+    expect(mounted.sink.current?.materials).toEqual([libraryMaterial('mat_a')]);
+    // No pending/failed chip and nothing in flight: a pick is already settled.
+    expect(mounted.sink.current?.uploading).toEqual([]);
+    expect(mounted.sink.current?.failed).toEqual([]);
+    expect(mounted.sink.current?.busy).toBe(false);
+  });
+
+  it('keeps several picks, in pick order', async () => {
+    const mounted = await mountEnabled();
+
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_a'));
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_b'));
+    });
+
+    expect(mounted.sink.current?.materials.map((m) => m.materialId)).toEqual(['mat_a', 'mat_b']);
+  });
+
+  it('ignores a second pick of the same material', async () => {
+    // Two chips sharing an id would make the single id-keyed `remove` drop both.
+    const mounted = await mountEnabled();
+
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_a'));
+    });
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial({ ...libraryMaterial('mat_a'), name: 'again.md' });
+    });
+
+    expect(mounted.sink.current?.materials).toEqual([libraryMaterial('mat_a')]);
+    expect(mounted.sink.current?.materials).toHaveLength(1);
+  });
+
+  it('removes a picked material like any other chip', async () => {
+    const mounted = await mountEnabled();
+
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_a'));
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_b'));
+    });
+    await mounted.act(async () => {
+      mounted.sink.current?.remove('mat_a');
+    });
+
+    expect(mounted.sink.current?.materials.map((m) => m.materialId)).toEqual(['mat_b']);
+  });
+
+  it('counts a picked material against the same slot budget as uploads', async () => {
+    const full = Array.from({ length: MAX_COMPOSER_MATERIALS }, (_, i) => libraryMaterial(`m${i}`));
+    const mounted = await mountEnabled(full);
+
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_extra'));
+    });
+
+    expect(mounted.sink.current?.materials).toHaveLength(MAX_COMPOSER_MATERIALS);
+    expect(mounted.errorSpy).toHaveBeenCalledWith(
+      `You can select up to ${MAX_COMPOSER_MATERIALS} materials at once`,
+    );
+  });
+
+  it('is inert before the runtime probe enables materials', async () => {
+    const runtime = new Promise<Response>(() => undefined);
+    const mounted = await mountComposer(
+      'en-US',
+      vi.fn(async () => runtime),
+    );
+    dispose = mounted.dispose;
+
+    expect(mounted.sink.current?.enabled).toBe(false);
+    await mounted.act(async () => {
+      mounted.sink.current?.addLibraryMaterial(libraryMaterial('mat_a'));
+    });
+
+    expect(mounted.sink.current?.materials).toEqual([]);
+    expect(mounted.errorSpy).not.toHaveBeenCalled();
   });
 });

@@ -2238,3 +2238,53 @@ export async function uploadWorkbenchMaterial(file: File): Promise<WorkbenchMate
     ...(body.extraction?.status ? { extractionStatus: body.extraction.status } : {}),
   };
 }
+
+/**
+ * List the owner's durable material library — everything uploaded through
+ * `POST /api/materials`, whether or not it is attached to a session.
+ *
+ * Owner-scoped server-side, and every request on this deployment resolves to
+ * the one shared owner, so this is the same list for every visitor: pick from
+ * it and the material binds exactly as if it had just been uploaded.
+ *
+ * The response is the OWNER projection (`originalName`/`mime`/`extraction`),
+ * not the session one `GET /api/materials` returns, so the field names differ
+ * from `WorkbenchMaterial`'s — that mapping is the only work here.
+ *
+ * A library row's extraction is always `idle`: extraction happens on the
+ * session's copy at bind time, so `idle` is the settled state and must not be
+ * surfaced as a failure.
+ */
+export async function listWorkbenchLibraryMaterials(): Promise<WorkbenchMaterial[]> {
+  const res = await fetch('/api/materials/library');
+  const body = (await res.json().catch(() => ({}))) as {
+    materials?: {
+      materialId?: unknown;
+      originalName?: unknown;
+      bytes?: unknown;
+      mime?: unknown;
+      extraction?: { status?: WorkbenchMaterial['extractionStatus'] };
+    }[];
+    error?: string;
+    message?: string;
+  };
+  if (!res.ok) {
+    const message = body.message ?? body.error ?? `GET /api/materials/library -> ${res.status}`;
+    throw new WorkbenchApiError(message, res.status);
+  }
+  return (body.materials ?? []).flatMap((item) => {
+    if (typeof item?.materialId !== 'string') return [];
+    return [
+      {
+        materialId: item.materialId,
+        name:
+          typeof item.originalName === 'string' && item.originalName
+            ? item.originalName
+            : item.materialId,
+        bytes: typeof item.bytes === 'number' && Number.isFinite(item.bytes) ? item.bytes : 0,
+        ...(typeof item.mime === 'string' && item.mime ? { mimeType: item.mime } : {}),
+        ...(item.extraction?.status ? { extractionStatus: item.extraction.status } : {}),
+      },
+    ];
+  });
+}

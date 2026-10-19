@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createWorkbenchSession,
+  listWorkbenchLibraryMaterials,
   postWorkbenchMessage,
   uploadWorkbenchMaterial,
+  WorkbenchApiError,
   WorkbenchMaterialUploadError,
 } from '@/lib/workbench/session-store';
 import { WORKBENCH_MATERIAL_ACCEPT } from '@/lib/workbench/material-upload-policy';
@@ -385,5 +387,98 @@ describe('workbench material client', () => {
       text: '继续',
       materialIds: [material.materialId],
     });
+  });
+});
+
+describe('workbench library client', () => {
+  it('reads the owner library from GET /api/materials/library', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      Response.json({
+        materials: [
+          {
+            materialId: material.materialId,
+            kind: 'source',
+            mime: material.mimeType,
+            bytes: material.bytes,
+            originalName: material.name,
+            extraction: { status: 'idle' },
+            createdAt: '2023-11-14T22:13:20.000Z',
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(listWorkbenchLibraryMaterials()).resolves.toEqual([material]);
+    expect(fetchMock).toHaveBeenCalledWith('/api/materials/library');
+  });
+
+  it('maps the owner projection onto the composer material shape', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          materials: [
+            {
+              materialId: 'mat_a',
+              // No originalName, no mime, no extraction: the row must still come
+              // back usable rather than throwing on a hole.
+              bytes: 12,
+            },
+          ],
+        }),
+      ),
+    );
+
+    await expect(listWorkbenchLibraryMaterials()).resolves.toEqual([
+      { materialId: 'mat_a', name: 'mat_a', bytes: 12 },
+    ]);
+  });
+
+  it('drops entries with no materialId instead of shipping undefined ids', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          materials: [{ originalName: 'orphan.pdf', bytes: 1 }, { materialId: 'mat_a', bytes: 2 }],
+        }),
+      ),
+    );
+
+    await expect(listWorkbenchLibraryMaterials()).resolves.toEqual([
+      { materialId: 'mat_a', name: 'mat_a', bytes: 2 },
+    ]);
+  });
+
+  it('answers an empty list when the library has nothing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ materials: [] })),
+    );
+
+    await expect(listWorkbenchLibraryMaterials()).resolves.toEqual([]);
+  });
+
+  it('surfaces a control-plane failure with its status preserved', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ message: 'nope' }, { status: 500 }),
+      ),
+    );
+
+    const error = await listWorkbenchLibraryMaterials().catch((err: unknown) => err);
+    expect(error).toBeInstanceOf(WorkbenchApiError);
+    expect((error as WorkbenchApiError).status).toBe(500);
+    expect((error as WorkbenchApiError).message).toBe('nope');
+  });
+
+  it('does not blow up on a body that is not JSON', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>gateway</html>', { status: 502 })),
+    );
+
+    await expect(listWorkbenchLibraryMaterials()).rejects.toBeInstanceOf(WorkbenchApiError);
   });
 });

@@ -40,7 +40,15 @@ export interface MaterialExtractionExecutionDependencies {
   complete?: (input: CompleteMaterialExtractionInput) => Promise<boolean>;
 }
 
-function artifactText(artifact: DocumentArtifact): string {
+/**
+ * The markdown/text an extracted document contributes.
+ *
+ * Exported because the owner knowledge base runs the same extractor registry
+ * outside a session (lib/server/knowledge-base/index-material.ts): it must read
+ * a document exactly the way extraction does, or the indexed text and the text
+ * the agent reads would disagree about the same file.
+ */
+export function artifactText(artifact: DocumentArtifact): string {
   return artifact.blocks
     .filter((block) => block.type === 'text' || block.type === 'markdown')
     .map((block) => block.text?.trim())

@@ -8,7 +8,8 @@
  *
  *   classic      one teaching segment per scene (slide / quiz / interactive).
  *   single-game  exactly ONE scene holding the whole lesson as a single
- *                multi-stage teaching mini-game.
+ *                multi-stage teaching mini-game. A model that returns more is
+ *                condensed back down, not truncated (see `overflow`).
  *   multi-game   one game scene PER teaching objective — more material means
  *                more game pages. ("PBL": the classic segmentation, with every
  *                segment rendered as a game instead of a lesson page.)
@@ -98,7 +99,22 @@ export interface OutlinePolicy {
    * finaliser then discards.
    */
   streamFirstSceneOnly: boolean;
+  /**
+   * How to reduce a model list that came back LONGER than `maxScenes`.
+   *
+   * `condense` — merge the surplus into the single allowed scene with one extra
+   * model call, and require the model to account for every input scene (see
+   * `lib/server/single-game-condense.ts`). The alternative the route used to
+   * take — keep one scene, silently discard the rest — loses teaching content
+   * with no record that it happened.
+   *
+   * `undefined` for modes that have no cap to overflow.
+   */
+  overflow?: OutlineOverflowStrategy;
 }
+
+/** See `OutlinePolicy.overflow`. */
+export type OutlineOverflowStrategy = 'condense';
 
 const POLICIES: Readonly<Record<GenerationMode, OutlinePolicy>> = {
   classic: {
@@ -113,6 +129,10 @@ const POLICIES: Readonly<Record<GenerationMode, OutlinePolicy>> = {
     forceGameScenes: true,
     maxScenes: 1,
     streamFirstSceneOnly: true,
+    // The prompt's hard contract is one scene, but a model that ignores it
+    // returns a whole course-shaped list. Condensing makes that a recoverable
+    // outcome instead of a silent one-page excerpt.
+    overflow: 'condense',
   },
   'multi-game': {
     // Segments the material by teaching objective and emits one game scene per

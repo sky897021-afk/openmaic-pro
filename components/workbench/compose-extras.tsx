@@ -6,7 +6,7 @@
  * the homepage/workspace launch face and the ongoing conversation composer.
  */
 import { useEffect, useId, useRef, useState } from 'react';
-import { AtSign, Loader2, Paperclip, Sparkles } from 'lucide-react';
+import { AtSign, Library, Loader2, Paperclip, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { cn } from '@/lib/utils/cn';
@@ -25,6 +25,7 @@ import {
   scheduleMaterialUploadBatch,
 } from '@/lib/workbench/material-upload-scheduling';
 import { WORKBENCH_MATERIAL_ACCEPT } from '@/lib/workbench/material-upload-policy';
+import { useLibraryMaterials } from '@/lib/workbench/material-library';
 import { slashQuery } from '@/lib/workbench/composer-skills';
 import { ComposerPendingPill, ComposerPill, ComposerPillRow } from './composer-pill';
 
@@ -271,6 +272,16 @@ export interface ComposerMaterials {
   /** Entries whose upload failed (shown as removable error chips). */
   failed: MaterialUploadEntry[];
   addFiles: (files: FileList | File[]) => void;
+  /**
+   * Attach a material that is already settled on the server — one picked from
+   * the owner's shared library rather than uploaded here. No upload runs, so it
+   * lands in `materials` directly; everything downstream (chips, `materialIds`
+   * on submit) then treats it exactly like an uploaded one.
+   *
+   * Deduped by `materialId`: two chips sharing an id would make the single
+   * id-keyed `remove` drop both.
+   */
+  addLibraryMaterial: (material: WorkbenchMaterial) => void;
   remove: (materialId: string) => void;
   removeFailed: (id: string) => void;
   clear: () => void;
@@ -401,6 +412,27 @@ export function useComposerMaterials(
     uploading,
     failed,
     addFiles,
+    addLibraryMaterial: (material) => {
+      if (!enabled) return;
+      // A no-op rather than a toast: the picker shows already-attached rows as
+      // disabled, so this is only reachable by a race (a pick landing as the
+      // same material arrives from an upload).
+      if (materials.some((item) => item.materialId === material.materialId)) return;
+      if (!slotLedger.current.canAccept(1)) {
+        toast.error(t('workbench.material.maxSelected', { count: MAX_COMPOSER_MATERIALS }));
+        return;
+      }
+      // Reserve then settle-succeeded: the ledger nets one OCCUPIED slot and no
+      // pending one, which is exactly what a finished upload leaves behind. A
+      // bare `occupied += 1` would skip the ledger's own accounting.
+      slotLedger.current.reserve(1);
+      slotLedger.current.settle(true);
+      setMaterials((current) =>
+        current.some((item) => item.materialId === material.materialId)
+          ? current
+          : [...current, material],
+      );
+    },
     remove: (materialId) =>
       setMaterials((items) => {
         if (items.some((item) => item.materialId === materialId)) {
@@ -465,6 +497,244 @@ export function AttachButton({
         </TooltipContent>
       </Tooltip>
     </>
+  );
+}
+
+/**
+ * The composer's library entry — picks a material that is ALREADY in the
+ * owner's library instead of uploading a new one.
+ *
+ * On this deployment every request resolves to one shared owner with no cookie,
+ * so "the owner's library" is the same list for every visitor: this button is
+ * how a course the owner prepared becomes usable by anyone who opens the URL.
+ *
+ * `data-library-trigger` is the button's half of the popover's exit contract —
+ * the menu's Escape and outside-press rules have to recognise a press aimed at
+ * its own trigger, or opening it would dismiss it in the same gesture.
+ */
+export function LibraryButton({
+  onClick,
+  disabled,
+  label,
+  testId = 'workbench-library-button',
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  label: string;
+  testId?: string;
+}) {
+  const materialsEnabled = useMaterialUploadsEnabled();
+  // Same gate as the attach button: with the runtime off the library route
+  // answers a plain 404, so there is nothing to open.
+  if (!materialsEnabled) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          data-testid={testId}
+          data-library-trigger=""
+          data-mention-keep-open=""
+          disabled={disabled}
+          aria-label={label}
+          onClick={onClick}
+          className="inline-flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
+        >
+          <Library className="size-4" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="text-xs">
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * The owner's material library, as a picker.
+ *
+ * Deliberately not a third menu on the `@`/`/` grammar: those two are seeded by
+ * a TOKEN in the draft, so their dismissal is a fact about a draft. This one is
+ * opened by a button and has no token behind it, so it owns a plain
+ * request flag — but it still goes through `resolveComposerMenu` so only one of
+ * the three can ever be open, and so the surfaces' send guards (`openMenu ===
+ * null`) cover it for free.
+ *
+ * Rows already attached are shown checked and disabled rather than hidden: the
+ * reader can see what is on the turn, and a second pick of the same id cannot
+ * happen (the state dedupes too, but a dead row says so first).
+ */
+export function MaterialLibraryMenu({
+  selectedIds,
+  onPick,
+  onDismiss,
+  title,
+}: {
+  /** Material ids already on the turn — shown but not pickable. */
+  selectedIds: readonly string[];
+  onPick: (material: WorkbenchMaterial) => void;
+  /** The menu's one exit — Escape, an outside press, and a pick all land here. */
+  onDismiss: () => void;
+  title: string;
+}) {
+  const { t } = useI18n();
+  const { materials, loading, error, reload } = useLibraryMaterials();
+  const titleId = useId();
+  const menuRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const selected = new Set(selectedIds);
+  // Navigation runs over the PICKABLE rows only, so ↑/↓ never parks on a row
+  // that Enter cannot choose.
+  const pickable = materials.map((_, index) => index).filter((index) => {
+    const material = materials[index];
+    return material !== undefined && !selected.has(material.materialId);
+  });
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const highlightedRow = pickable[Math.min(highlightedIndex, Math.max(0, pickable.length - 1))];
+
+  useEffect(() => {
+    optionRefs.current[highlightedRow ?? -1]?.scrollIntoView({ block: 'nearest' });
+  }, [highlightedRow]);
+
+  useEffect(() => {
+    const onPointerDown = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (menuRef.current?.contains(target)) return;
+      // The trigger exempts itself: without this, the press that OPENS the menu
+      // is also the press that closes it.
+      if (target.closest('[data-library-trigger]')) return;
+      if (target.closest('[data-mention-keep-open]')) return;
+      onDismiss();
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => document.removeEventListener('pointerdown', onPointerDown, true);
+  }, [onDismiss]);
+
+  useEffect(() => {
+    // Escape is armed even with nothing to pick — the picker can open onto a
+    // failed or empty library, and a menu that cannot be closed is worse than
+    // one that closes without choosing. It closes from INSIDE the menu too, so
+    // the error branch's retry button can hold focus and the keyboard still
+    // works afterwards. Navigation and picking stay rows-gated.
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      const inMenu =
+        event.target instanceof Node && menuRef.current?.contains(event.target) === true;
+      // After the trigger is clicked, focus sits on the BUTTON — outside the
+      // menu. Both are anchors for the keys; anywhere else on the page is not,
+      // so the picker never eats a keystroke aimed at something else.
+      const anchored =
+        inMenu ||
+        (event.target instanceof Element &&
+          event.target.closest('[data-library-trigger]') !== null);
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        onDismiss();
+        return;
+      }
+
+      if (!anchored || pickable.length === 0) return;
+
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        event.stopPropagation();
+        const direction = event.key === 'ArrowDown' ? 1 : -1;
+        setHighlightedIndex((current) => (current + direction + pickable.length) % pickable.length);
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        const material = highlightedRow === undefined ? undefined : materials[highlightedRow];
+        if (!material) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onPick(material);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [highlightedRow, materials, onDismiss, onPick, pickable.length]);
+
+  return (
+    <div
+      ref={menuRef}
+      data-testid="workbench-material-menu"
+      data-esc-owner=""
+      role="listbox"
+      aria-labelledby={titleId}
+      className="pro-skill-slash-popover absolute bottom-full left-0 z-30 mb-1.5 w-full max-w-[340px] overflow-hidden rounded-xl border border-border bg-popover shadow-lg"
+    >
+      <p id={titleId} className="px-3 pb-1 pt-2 text-[10.5px] font-medium text-muted-foreground">
+        {title}
+      </p>
+      <ul className="max-h-56 overflow-y-auto pb-1">
+        {loading ? (
+          <li className="flex items-center gap-2 px-3 py-3 text-[11px] text-muted-foreground">
+            <Loader2 className="size-3 animate-spin motion-reduce:animate-none" />
+            {t('proMode.materialsLoading')}
+          </li>
+        ) : error ? (
+          <li className="px-3 py-3 text-[11px] text-muted-foreground">
+            <span>{t('proMode.materialsLoadFailed')}</span>{' '}
+            <button
+              type="button"
+              className="text-[var(--wb-accent)] hover:underline"
+              onClick={() => void reload().catch(() => {})}
+            >
+              {t('proMode.retryMaterials')}
+            </button>
+          </li>
+        ) : materials.length === 0 ? (
+          <li className="px-3 py-3 text-[11px] text-muted-foreground">
+            {t('proMode.noMaterialsAvailable')}
+          </li>
+        ) : (
+          materials.map((material, index) => {
+            const attached = selected.has(material.materialId);
+            const isHighlighted = index === highlightedRow;
+            return (
+              <li key={material.materialId}>
+                <button
+                  ref={(node) => {
+                    optionRefs.current[index] = node;
+                  }}
+                  type="button"
+                  role="option"
+                  aria-selected={isHighlighted}
+                  aria-disabled={attached || undefined}
+                  disabled={attached}
+                  data-highlighted={isHighlighted ? 'true' : undefined}
+                  data-testid={`workbench-material-option-${material.materialId}`}
+                  onClick={() => onPick(material)}
+                  onMouseEnter={() => {
+                    const position = pickable.indexOf(index);
+                    if (position >= 0) setHighlightedIndex(position);
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-1.5 px-3 py-2 text-left transition-colors',
+                    attached ? 'opacity-45' : 'hover:bg-muted',
+                    isHighlighted && !attached && 'bg-muted',
+                  )}
+                >
+                  <Paperclip size={11} className="shrink-0 opacity-70" />
+                  <span className="min-w-0 truncate text-[12.5px] font-medium text-foreground">
+                    {material.name}
+                  </span>
+                  {attached ? (
+                    <span className="ml-auto shrink-0 text-[10.5px] text-muted-foreground">
+                      {t('proMode.materialAttached')}
+                    </span>
+                  ) : null}
+                </button>
+              </li>
+            );
+          })
+        )}
+      </ul>
+    </div>
   );
 }
 

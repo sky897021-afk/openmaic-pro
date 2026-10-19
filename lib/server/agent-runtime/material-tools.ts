@@ -132,8 +132,12 @@ const UNTRUSTED_MATERIAL_TAG = 'untrusted-material-content';
  * redrawn in the (cryptographically unreachable) event that the payload
  * already contains it, which turns "cannot be forged" from a probabilistic
  * claim into a checked postcondition.
+ *
+ * Exported so the knowledge-base tool fences its excerpts with THIS function:
+ * the model must meet one framing for untrusted text, not one per tool that
+ * happens to return some.
  */
-function untrustedMaterialBlock(verbatim: string): string {
+export function untrustedMaterialBlock(verbatim: string): string {
   let tag = `${UNTRUSTED_MATERIAL_TAG}-${randomBytes(8).toString('hex')}`;
   for (let attempt = 0; verbatim.includes(tag) && attempt < 4; attempt += 1) {
     tag = `${UNTRUSTED_MATERIAL_TAG}-${randomBytes(8).toString('hex')}`;

@@ -14,7 +14,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { streamLLM } from '@/lib/ai/llm';
+import { callLLM, streamLLM } from '@/lib/ai/llm';
 import {
   resolveFallbackModel,
   shouldFallbackFor,
@@ -46,6 +46,11 @@ import { sortDocumentImagesForVision } from '@/lib/document/bundle';
 import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
 import { resolveVocationalActive } from '@/lib/config/feature-flags';
 import { resolveGenerationMode, resolveOutlinePolicy } from '@/lib/config/generation-modes';
+import {
+  condenseOutlines,
+  mergeOutlinesMechanically,
+  summarizeDispositions,
+} from '@/lib/server/single-game-condense';
 const log = createLogger('Outlines Stream');
 
 export const maxDuration = 300;
@@ -318,22 +323,79 @@ function toGameScene(
 }
 
 /**
- * Single-game mode: normalize an arbitrary outline list down to exactly one
- * interactive/game scene.
+ * Single-game mode: coerce ONE outline into an interactive/game scene.
  *
- * The first already-formed game scene is preferred (its description/keyPoints
- * come from the model); otherwise the first scene is coerced into a game.
+ * Precondition: `outlines` holds at most one scene. With more, taking one would
+ * discard teaching content — which is the whole reason
+ * `reduceToSingleGameOutline` exists, and it is this function's only caller.
  */
 function coerceToSingleGameOutline(
   outlines: SceneOutline[],
   requirements: UserRequirements,
 ): SceneOutline[] {
-  const source =
-    outlines.find((outline) => outline.type === 'interactive' && outline.widgetType === 'game') ??
-    outlines[0];
+  const source = outlines[0];
   if (!source) return [];
 
   return [toGameScene(source, requirements, 1, [requirements.requirement])];
+}
+
+/**
+ * ②'s reducer: whatever the model returned becomes exactly one game scene.
+ *
+ * The prompt asks for one scene and usually gets it. When it does not — a long
+ * document invites a course-shaped answer — the surplus is *condensed* by one
+ * extra model call that has to account for every scene it was handed, and only
+ * if that call fails outright does a mechanical merge take over. Keeping one
+ * scene and dropping the rest is what this replaces: it silently produced a
+ * one-page excerpt of the material, and looked exactly like a thin page.
+ *
+ * The opening line is unconditional and deliberately greppable, so how often the
+ * one-page contract actually holds can be read off the log rather than guessed
+ * at.
+ */
+async function reduceToSingleGameOutline(
+  outlines: SceneOutline[],
+  requirements: UserRequirements,
+  deps: {
+    /** The directive the first pass already streamed, for phrasing context. */
+    languageDirective: string;
+    /** One round-trip to the model; throws on transport failure. */
+    runModel: (prompt: { system: string; user: string }) => Promise<string>;
+  },
+): Promise<SceneOutline[]> {
+  log.info(
+    `Single-game: model returned ${outlines.length} scene(s)` +
+      (outlines.length <= 1 ? ' — no condense needed' : ' — condensing the surplus into one'),
+  );
+
+  if (outlines.length <= 1) {
+    return coerceToSingleGameOutline(outlines, requirements);
+  }
+
+  const condensed = await condenseOutlines({
+    outlines,
+    requirements,
+    languageDirective: deps.languageDirective,
+    runModel: deps.runModel,
+  });
+
+  if (condensed.ok) {
+    log.info(
+      `Single-game: condensed ${outlines.length} scenes into one in ${condensed.attempts} attempt(s) [${summarizeDispositions(condensed.dispositions)}]`,
+    );
+    return [toGameScene(condensed.scene, requirements, 1, [requirements.requirement])];
+  }
+
+  // Degraded, and it says so: the page is built by code, so it is a page that
+  // covers the material rather than a game that teaches it.
+  log.warn(
+    `Single-game: condensation failed (${condensed.reason}: ${condensed.detail}) — mechanically merging all ${outlines.length} scenes instead`,
+  );
+  const merged = mergeOutlinesMechanically(outlines, requirements);
+  log.warn(
+    `Single-game: mechanical merge carried ${merged.coveredScenes}/${outlines.length} scene(s), ${merged.droppedKeyPoints} key point(s) dropped — page quality is degraded`,
+  );
+  return [toGameScene(merged.outline, requirements, 1, [requirements.requirement])];
 }
 
 /**
@@ -567,6 +629,31 @@ export async function POST(req: NextRequest) {
       `Generating outlines: "${requirements.requirement.substring(0, 50)}" [model=${modelString}]`,
     );
 
+    /**
+     * The second model call ② may need, for when the first one ignored the
+     * one-page contract. Same model, same credentials and same fallback
+     * arming as the outline call itself — a condensation that quietly used a
+     * different model would be a different product from the one the operator
+     * configured. Labelled separately in the usage log, since it is a distinct
+     * line item.
+     */
+    const runCondenseModel = async (prompt: { system: string; user: string }): Promise<string> => {
+      const result = await callLLM(
+        {
+          model: languageModel,
+          system: prompt.system,
+          prompt: prompt.user,
+          maxOutputTokens: modelInfo?.outputWindow,
+          abortSignal: req.signal,
+        },
+        'scene-outlines-condense',
+        undefined,
+        thinkingConfig,
+        { serverManaged: serverManagedPrimary },
+      );
+      return result.text;
+    };
+
     // Create SSE stream with heartbeat to prevent connection timeout
     const encoder = new TextEncoder();
     const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -768,8 +855,10 @@ export async function POST(req: NextRequest) {
                   // Single-game mode: stream only the first parsed scene. The
                   // model is instructed to return exactly one, but if it returns
                   // more we must not flash extra pages into the client's live
-                  // outline list — `coerceToSingleGameOutline` picks the best
-                  // game scene at finalize time regardless.
+                  // outline list — the finaliser replaces this preview with the
+                  // single scene it reduces the list to regardless. One scene
+                  // streamed early is worth the flash: it is the usual case, and
+                  // the outline pass is long enough that silent waiting is worse.
                   if (!policy.streamFirstSceneOnly || parsedOutlines.length === 1) {
                     const event = JSON.stringify({
                       type: 'outline',
@@ -890,16 +979,38 @@ export async function POST(req: NextRequest) {
           }
 
           if (parsedOutlines.length > 0) {
+            // The client may have walked away while the last model call ran;
+            // the SSE controller is already closed and enqueuing would throw
+            // past the catch below.
+            if (req.signal?.aborted) {
+              stopHeartbeat();
+              return;
+            }
+
             // Game modes force the final list before it leaves the server; the
-            // prompt is only advisory. `maxScenes === 1` collapses whatever came
-            // back into the single best game, otherwise every surviving scene
-            // becomes one game page (one per teaching objective, so more
-            // material means more pages).
-            const finalOutlines = policy.forceGameScenes
-              ? policy.maxScenes === 1
-                ? coerceToSingleGameOutline(parsedOutlines, requirements)
-                : coerceToGameOutlines(parsedOutlines, requirements)
-              : parsedOutlines;
+            // prompt is only advisory. How a mode reduces what the model
+            // over-returns is the policy's call, not a branch on the mode name.
+            let finalOutlines: SceneOutline[];
+            if (!policy.forceGameScenes) {
+              // ①: the model's list IS the course.
+              finalOutlines = parsedOutlines;
+            } else if (policy.maxScenes !== undefined) {
+              // ②: one page, whatever the model returned. A capped mode that
+              // does not condense can only pick one scene and drop the rest —
+              // which is what `coerceToSingleGameOutline` does, and what ② used
+              // to do before `overflow: 'condense'` replaced it.
+              finalOutlines =
+                policy.overflow === 'condense'
+                  ? await reduceToSingleGameOutline(parsedOutlines, requirements, {
+                      languageDirective: languageDirective || DEFAULT_LANGUAGE_DIRECTIVE,
+                      runModel: runCondenseModel,
+                    })
+                  : coerceToSingleGameOutline(parsedOutlines, requirements);
+            } else {
+              // ③: one game page per teaching objective, so the page count is
+              // the model's — more material means more pages.
+              finalOutlines = coerceToGameOutlines(parsedOutlines, requirements);
+            }
             // Replace sequential gen_img_N/gen_vid_N with globally unique IDs
             const uniquifiedOutlines = uniquifyMediaElementIds(finalOutlines);
             // Send done event with all outlines

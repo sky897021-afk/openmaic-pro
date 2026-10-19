@@ -896,6 +896,7 @@ describe('embedded persistence route', () => {
       'chat',
       'quizAttempt',
       'whiteboard',
+      'gameResult',
     ]);
   });
 

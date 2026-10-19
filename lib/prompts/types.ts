@@ -8,6 +8,7 @@
 export type PromptId =
   | 'interactive-outlines'
   | 'single-game-outlines'
+  | 'single-game-condense'
   | 'multi-game-outlines'
   | 'task-engine-outlines'
   | 'web-search-query-rewrite'

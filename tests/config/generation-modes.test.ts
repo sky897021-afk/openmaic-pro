@@ -101,11 +101,20 @@ describe('resolveOutlinePolicy', () => {
     expect(policy.promptId).toBe('single-game-outlines');
   });
 
+  it('reduces ② overflow by condensing, never by truncating', () => {
+    // A model handed a long document still sometimes answers with a whole
+    // course. Keeping one scene and dropping the rest loses teaching content
+    // with no record that it happened, so the cap has to say how it reduces.
+    expect(resolveOutlinePolicy('single-game').overflow).toBe('condense');
+  });
+
   it('forces games in ③ but leaves the scene count to the model', () => {
     const policy = resolveOutlinePolicy('multi-game');
     expect(policy.maxScenes).toBeUndefined();
     expect(policy.forceGameScenes).toBe(true);
     expect(policy.streamFirstSceneOnly).toBe(false);
+    // Nothing to overflow: ③'s page count IS its segmentation.
+    expect(policy.overflow).toBeUndefined();
   });
 
   it('leaves ① alone', () => {
@@ -114,6 +123,7 @@ describe('resolveOutlinePolicy', () => {
     expect(policy.forceGameScenes).toBe(false);
     expect(policy.maxScenes).toBeUndefined();
     expect(policy.streamFirstSceneOnly).toBe(false);
+    expect(policy.overflow).toBeUndefined();
   });
 });
 

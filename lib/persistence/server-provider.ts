@@ -16,6 +16,7 @@ import { validateAppScene, validateAppStage } from '@/lib/document-store/validat
 import { configuredLazyAssetByteStore } from '@/lib/persistence/asset-byte-store';
 import { resolveAssetPendingTtlMs } from '@/lib/persistence/asset-pending-ttl';
 import { resolveAssetQuotaBytes } from '@/lib/persistence/asset-quota';
+import { ensureKnowledgeBaseSchema } from '@/lib/persistence/knowledge-base';
 import { ensureOwnerMaterialSchema } from '@/lib/persistence/owner-materials';
 import { fenceOwnerWrite } from '@/lib/persistence/owner-merges';
 import { withSchemaBootstrapLock } from '@/lib/persistence/schema-bootstrap-lock';
@@ -78,6 +79,9 @@ async function createServerPersistenceProvider(
       await ensureDocumentSchema(locked);
       await ensureStageMetaSchema(locked);
       await ensureOwnerMaterialSchema(locked);
+      // The knowledge base reads materials, not the other way round, so it
+      // bootstraps after them and never holds the library open.
+      await ensureKnowledgeBaseSchema(locked);
       await ensureAssetSchema(locked);
     });
     const withTransaction = nodePostgresTransaction(queryable);

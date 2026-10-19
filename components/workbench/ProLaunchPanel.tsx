@@ -39,7 +39,9 @@ import {
 import {
   AtSignButton,
   AttachButton,
+  LibraryButton,
   MaterialChips,
+  MaterialLibraryMenu,
   SkillButton,
   SkillSlashMenu,
   useComposerMaterials,
@@ -190,6 +192,12 @@ export function ProLaunchPanel({
    */
   const [courseRefs, setCourseRefs] = useState<readonly CourseRef[]>([]);
   const [mentionOpen, setMentionOpen] = useState(false);
+  /**
+   * The library picker's request flag. Unlike the other two this menu has no
+   * token in the draft, so it is a plain request — the same shape as
+   * `mentionOpen`, which is likewise the `@` menu's button path.
+   */
+  const [libraryOpen, setLibraryOpen] = useState(false);
   // One popover at a time, one rule for both composers. The `@` menu's two
   // ways in: the keystroke and the `@` button.
   const {
@@ -202,6 +210,7 @@ export function ProLaunchPanel({
     slashDismissedOn: slashDismissed,
     mentionDismissedOn: mentionDismissed,
     courseMenuRequested: mentionOpen,
+    libraryMenuRequested: libraryOpen,
     courseMenuAvailable: courseOptions.length > 0,
   });
   const mentionMenuOpen = openMenu === 'course';
@@ -220,7 +229,19 @@ export function ProLaunchPanel({
   const openMention = useCallback(() => {
     textareaRef.current?.focus();
     setMentionDismissed(null);
+    // The two button-opened menus replace each other rather than stacking a
+    // request behind the other one's dismissal.
+    setLibraryOpen(false);
     setMentionOpen(true);
+  }, []);
+  /**
+   * The library button's way in. Deliberately does NOT move focus: this menu
+   * owns its own keys, so focusing the textarea would hand them to the wrong
+   * surface.
+   */
+  const openLibrary = useCallback(() => {
+    setMentionOpen(false);
+    setLibraryOpen(true);
   }, []);
   const untitledCourse = t('workspace.untitledCourse');
   const mentionCandidates = useMemo(
@@ -399,6 +420,17 @@ export function ProLaunchPanel({
             onDismiss={closeSkillMenu}
           />
         ) : null}
+        {openMenu === 'library' ? (
+          <MaterialLibraryMenu
+            title={t('proMode.materialMenuTitle')}
+            selectedIds={materials.materials.map((m) => m.materialId)}
+            onPick={(material) => {
+              materials.addLibraryMaterial(material);
+              setLibraryOpen(false);
+            }}
+            onDismiss={() => setLibraryOpen(false)}
+          />
+        ) : null}
         {mentionMenuOpen ? (
           // The same picker the conversation composer opens, on the same one
           // entry point (the `@` keystroke).
@@ -551,6 +583,14 @@ export function ProLaunchPanel({
             disabled={submitting}
             label={t('proMode.loadSkill')}
             onClick={openSkillMenu}
+          />
+          <LibraryButton
+            testId="pro-launch-library"
+            disabled={submitting}
+            label={t('proMode.chooseMaterial')}
+            // Toggles: this popover has no draft token, so the button is the
+            // only way back out of it that does not involve the keyboard.
+            onClick={() => (libraryOpen ? setLibraryOpen(false) : openLibrary())}
           />
           <div className="flex-1" />
           <ProLaunchSend canSend={canSend} onSubmit={submit} />

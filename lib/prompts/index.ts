@@ -26,6 +26,7 @@ export {
 export const PROMPT_IDS = {
   INTERACTIVE_OUTLINES: 'interactive-outlines',
   SINGLE_GAME_OUTLINES: 'single-game-outlines',
+  SINGLE_GAME_CONDENSE: 'single-game-condense',
   MULTI_GAME_OUTLINES: 'multi-game-outlines',
   TASK_ENGINE_OUTLINES: 'task-engine-outlines',
   WEB_SEARCH_QUERY_REWRITE: 'web-search-query-rewrite',

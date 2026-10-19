@@ -7,6 +7,7 @@ import type { AssetStore } from '../src/asset/types.js';
 import { BrowserRuntimeStore } from '../src/runtime/browser.js';
 import { HttpRuntimeStore } from '../src/runtime/http.js';
 import {
+  RuntimeAppendConflictError,
   RuntimeSessionExistsError,
   RuntimeStageNotFoundError,
   type RuntimePayloadValidator,
@@ -997,6 +998,56 @@ describe('reference HTTP handler stage-not-found refusals', () => {
       await expect(response.json()).resolves.toMatchObject({
         error: { code: 'STAGE_NOT_FOUND' },
       });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+});
+
+describe('reference HTTP handler append-conflict refusals', () => {
+  test.each([
+    ['the exported class', () => new RuntimeAppendConflictError('conflict-session', null, 0)],
+    [
+      'a same-named error from another realm',
+      () =>
+        Object.assign(new Error('last seq changed from null to 0'), {
+          name: 'RuntimeAppendConflictError',
+          code: 'RUNTIME_APPEND_CONFLICT',
+          sessionId: 'conflict-session',
+          expectedLastSeq: null,
+          actualLastSeq: 0,
+        }),
+    ],
+  ])('answers 409 RUNTIME_APPEND_CONFLICT for %s thrown by appendRecord', async (_label, makeError) => {
+    const session = {
+      ...makeSession({ id: 'conflict-session', learnerKey: 'learner-a', stageId: 'stage-1' }),
+      runtimeDslVersion: RUNTIME_DSL_VERSION,
+    };
+    const store = {
+      getSession: async () => session,
+      appendRecord: async () => {
+        throw makeError();
+      },
+    } as unknown as RuntimeStore;
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const handler = createRuntimeHttpHandler(store, {
+        authenticate: async () => ({ learnerKey: session.learnerKey }),
+      });
+      const response = await handlerFetch(handler, async () => `Bearer ${session.learnerKey}`)(
+        `${BASE_URL}/runtime/sessions/${session.id}/records`,
+        { method: 'POST', body: JSON.stringify(makeRecordInit(session.id)) },
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: 'RUNTIME_APPEND_CONFLICT',
+          details: { sessionId: 'conflict-session', expectedLastSeq: null, actualLastSeq: 0 },
+        },
+      });
+      // A mapped conflict is not an internal error, so it must not be logged as one.
       expect(consoleError).not.toHaveBeenCalled();
     } finally {
       consoleError.mockRestore();

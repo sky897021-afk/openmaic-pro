@@ -308,6 +308,12 @@ interface CoursePromptBlocks {
    * with nothing to read).
    */
   materials?: string;
+  /**
+   * Owner knowledge-base guidance. Present only when this deployment has an
+   * embedding route AND at least one indexed document — the block names the
+   * documents it can reach, so an empty index has nothing to name.
+   */
+  knowledgeBase?: string;
   /** Roster guidance (list_voices / set_roster; always registered). */
   roster?: string;
   /** Voice-cloning guidance (clip_audio / register_voice; always registered). */
@@ -337,6 +343,7 @@ export function courseSystemPrompt(blocks: CoursePromptBlocks): string {
   if (blocks.fetch) parts.push('', blocks.fetch);
   if (blocks.untrustedContent) parts.push('', blocks.untrustedContent);
   if (blocks.materials) parts.push('', blocks.materials);
+  if (blocks.knowledgeBase) parts.push('', blocks.knowledgeBase);
   if (blocks.roster) parts.push('', blocks.roster);
   if (blocks.voice) parts.push('', blocks.voice);
   return parts.join('\n');

@@ -139,6 +139,55 @@ describe('a surface with no courses to offer', () => {
   });
 });
 
+describe('the material library picker', () => {
+  it('opens on the library button’s request, with or without a draft', () => {
+    expect(menuOf('', { libraryMenuRequested: true }).menu).toBe('library');
+    expect(menuOf('写一节课', { libraryMenuRequested: true }).menu).toBe('library');
+  });
+
+  it('stays shut when its button has not asked', () => {
+    expect(menuOf('写一节课').menu).toBeNull();
+    expect(menuOf('', { courseMenuRequested: true }).menu).toBe('course');
+  });
+
+  it('loses the slot to a live `/` query', () => {
+    // The thing being typed right now is the more specific intent.
+    const state = menuOf('/stage', { libraryMenuRequested: true });
+    expect(state.menu).toBe('skill');
+    expect(state.slash).toBe('stage');
+  });
+
+  it('outranks the `@` button’s request', () => {
+    // Both are button presses; the newer one wins, or a press would look dead
+    // while the course menu happened to be open.
+    expect(menuOf('', { libraryMenuRequested: true, courseMenuRequested: true }).menu).toBe(
+      'library',
+    );
+  });
+
+  it('outranks a live `@` token, and hands the slot back when it closes', () => {
+    // The token stays live underneath, so dismissing the library legitimately
+    // reveals the course menu again — that is the token's rule, not a zombie.
+    expect(menuOf('改一下 @光', { libraryMenuRequested: true }).menu).toBe('library');
+    expect(menuOf('改一下 @光', { libraryMenuRequested: false }).menu).toBe('course');
+  });
+
+  it('reports an `@` token it is sitting on top of', () => {
+    // The state still carries the mention, so a surface that needs it (clearing
+    // the token side on pick) can see it while the library owns the slot.
+    const state = menuOf('改一下 @光', { libraryMenuRequested: true });
+    expect(state.mention?.query).toBe('光');
+  });
+
+  it('is subject to no `@`-only rule', () => {
+    // `courseMenuAvailable: false` silences the course menu; the library is a
+    // different list and is unaffected.
+    expect(menuOf('', { libraryMenuRequested: true, courseMenuAvailable: false }).menu).toBe(
+      'library',
+    );
+  });
+});
+
 describe('a dismissal binds however the menu was opened', () => {
   it('covers the button’s request, not only the token', () => {
     // The rule alone has to hold this: needing the component to ALSO clear its

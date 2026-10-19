@@ -47,9 +47,20 @@ export type RuntimePayloadValidator = (
   payload: unknown,
 ) => { valid: true } | { valid: false; errors: { path: string; message: string }[] };
 
-/** A compare-and-append precondition failed inside the store transaction. */
+/**
+ * A compare-and-append precondition failed inside the store transaction.
+ *
+ * Like the two errors below, it is recognized by `code` as well as by class,
+ * so a store reached through a second instance of this package still maps to
+ * `409 RUNTIME_APPEND_CONFLICT` rather than the handler's generic 500. That is
+ * not hypothetical: an app whose instrumentation layer and route layer each
+ * get their own copy of this package holds one class object per layer, and the
+ * session rows a shared `PgRuntimeStore` writes are read back by an
+ * `instanceof` that never matches.
+ */
 export class RuntimeAppendConflictError extends Error {
   override readonly name = 'RuntimeAppendConflictError';
+  readonly code = 'RUNTIME_APPEND_CONFLICT' as const;
 
   constructor(
     readonly sessionId: string,

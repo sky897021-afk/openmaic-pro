@@ -47,6 +47,13 @@ import { assembleRunnerTools, buildRunnerCoursePrompt } from './runner-contract'
 import { generationModePromptBlock } from './generation-mode-prompt';
 import { DEFAULT_GENERATION_MODE, parseGenerationMode } from '@/lib/config/generation-modes';
 import { buildMaterialTools, MATERIAL_TOOL_NAMES } from './material-tools';
+import { hasConfiguredKnowledgeBaseEmbedding } from '@/lib/server/knowledge-base/embed';
+import { listIndexedKnowledgeMaterialNames } from '@/lib/server/knowledge-base/index-material';
+import {
+  buildKnowledgeBaseTools,
+  KNOWLEDGE_BASE_TOOL_NAMES,
+  knowledgeBasePromptBlock,
+} from '@/lib/server/knowledge-base/tools';
 import { buildRosterTools, ROSTER_TOOL_NAMES, ROSTER_TOOLS_PROMPT } from './roster-tools';
 import {
   buildVoiceCloneTools,
@@ -1412,6 +1419,20 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
     // the tools read through the same session-scoped store on each call.
     const materials = await listSessionMaterials(id);
     const materialTools = buildMaterialTools({ sessionId: id });
+    // The knowledge base is OWNER-scoped, not session-scoped: it is reachable
+    // from any conversation of this owner whether or not the underlying
+    // material was ever attached, which is the entire point of it. Registered
+    // only when the deployment has an embedding route — an unconfigured
+    // deployment gets no tool rather than one whose every call can only fail.
+    // The names feed the prompt block and are read fresh per run, so a material
+    // indexed between two messages of the same conversation becomes visible on
+    // the next run rather than never.
+    const knowledgeBaseTools = hasConfiguredKnowledgeBaseEmbedding()
+      ? buildKnowledgeBaseTools({ ownerId: meta.ownerId })
+      : [];
+    const knowledgeBaseNames = knowledgeBaseTools.length
+      ? await listIndexedKnowledgeMaterialNames(meta.ownerId).catch(() => [])
+      : [];
     // Session-scoped registered voices: register_voice appends here, and
     // list_voices / set_roster (roster-tools) read the same array, so a cloned
     // voice stays bindable within the session that registered it (in-session
@@ -1473,6 +1494,7 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
       curriculumTools,
       scenePreviewTools,
       materialTools,
+      knowledgeBaseTools,
       rosterTools,
       voiceCloneTools,
       personalHistoryTools,
@@ -1489,6 +1511,7 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
         fetch: fetchPromptBlock(),
         untrustedContent: untrustedContentPolicyPromptBlock(),
         ...(materials.length ? { materials: sessionMaterialsPromptBlock(materials) } : {}),
+        knowledgeBase: knowledgeBasePromptBlock(knowledgeBaseNames),
         roster: ROSTER_TOOLS_PROMPT,
         voice: voiceCloneToolsPrompt(voiceRegistrationEnabled),
       }),
@@ -1501,6 +1524,7 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
         ...SKILL_EDIT_TOOL_NAMES,
         ...(skillReadTool ? ['read'] : []),
         ...MATERIAL_TOOL_NAMES,
+        ...KNOWLEDGE_BASE_TOOL_NAMES,
         ...dslTools.map((tool) => tool.name),
         ...scenePreviewTools.map((tool) => tool.name),
         ...CURRICULUM_ALLOWLIST,

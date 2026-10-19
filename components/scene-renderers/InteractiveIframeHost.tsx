@@ -18,6 +18,9 @@ import { intersectClientBoxes } from '@/lib/edit/visible-client-rect';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useElementRefsStore } from '@/lib/store/element-refs';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { useStageStore } from '@/lib/store/stage';
+import { GAME_RESULT_MESSAGE_TYPE, normalizeGameResultPayload } from '@/lib/game/runtime/types';
+import { recordGameResult, type RecordGameResultInput } from '@/lib/game/runtime/record';
 import {
   ELEMENT_REF_SELECTOR_MAX,
   ELEMENT_SNAPSHOT_MAX,
@@ -33,6 +36,17 @@ type InteractivePickerMessage = {
   selector?: unknown;
   outerHTML?: unknown;
   text?: unknown;
+};
+
+/**
+ * Anything an iframe may post at this host. Picker and error messages use
+ * `kind`; a game result uses `type`, so the two discriminants never collide.
+ */
+type IframeHostMessage = InteractivePickerMessage & {
+  errorKind?: string;
+  message?: unknown;
+  type?: unknown;
+  payload?: unknown;
 };
 
 type ElementPickerMode = 'editor' | 'playback-stable-id';
@@ -114,6 +128,61 @@ export function handleInteractivePickerMessage(
   refsStore.toggle(
     makeInteractiveElementRef(target.stageId, sceneId, { selector, outerHTML, text }, t),
   );
+  return true;
+}
+
+/**
+ * A generated game page reports its outcome at the end of a session, and a
+ * double-ended session (timeout firing alongside a click) can report the same
+ * play twice within a few milliseconds. Drop a byte-identical repeat inside
+ * this window; a genuine replay takes far longer than this, so its
+ * `durationMs` never matches.
+ */
+const GAME_RESULT_DUPLICATE_WINDOW_MS = 1500;
+
+/** Per-iframe memory of the last accepted result, owned by `PooledIframe`. */
+export interface GameResultSeen {
+  current: { signature: string; at: number } | null;
+}
+
+/**
+ * Consume one `maic:game-result:v1` message posted by THIS pooled iframe.
+ *
+ * Returns true when `data` is a game-result message at all, so the caller stops
+ * before the picker/error branches (the message carries neither `kind` nor
+ * `__maicInteractive`, so it would be dropped there). Returns false for every
+ * other message so the existing branches run unchanged.
+ *
+ * Never throws and never blocks: the record is written fire-and-forget, well
+ * after the game painted its own result screen. The payload is
+ * model-generated and entirely client-reported, so it is normalized first and
+ * silently skipped when unusable.
+ */
+export function handleGameResultMessage(
+  sceneId: string,
+  stageId: string | undefined,
+  hasInlineDocument: boolean,
+  data: IframeHostMessage | undefined,
+  seen: GameResultSeen,
+  record: (input: RecordGameResultInput) => Promise<void> = recordGameResult,
+  now: () => number = Date.now,
+): boolean {
+  if (data?.type !== GAME_RESULT_MESSAGE_TYPE) return false;
+  // An external-URL scene is not a generated page, and without a stage id the
+  // record would be unaddressable: swallow the message rather than mis-file it.
+  if (!hasInlineDocument || !stageId) return true;
+  const payload = normalizeGameResultPayload(data.payload);
+  if (!payload) return true;
+  const signature = JSON.stringify(payload);
+  const at = now();
+  const last = seen.current;
+  if (last && last.signature === signature && at - last.at <= GAME_RESULT_DUPLICATE_WINDOW_MS) {
+    return true;
+  }
+  seen.current = { signature, at };
+  void record({ stageId, sceneId, payload }).catch((error) => {
+    console.warn('[InteractiveIframeHost] failed to persist game result', error);
+  });
   return true;
 }
 
@@ -234,6 +303,13 @@ function PooledIframe({
 }: PooledIframeProps) {
   const { t } = useI18n();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  // The stage a game result belongs to. Read from the same store `Stage` reads
+  // (`components/stage.tsx`), so no prop threading is needed; the selector
+  // returns a primitive, so a stage change does not churn this component.
+  const stageId = useStageStore((s) => s.stage?.id);
+  // `useRef` object doubles as the mutable `GameResultSeen` slot, so the
+  // duplicate guard survives the listener re-subscribing on a document change.
+  const gameResultSeen = useRef<GameResultSeen>({ current: null });
   const runtimeErrors = useSceneRuntimeErrors((state) => state.errors[sceneId]);
   const runtimeErrorSignature = runtimeErrors?.join('\n') ?? '';
   const [dismissedRuntimeSignature, setDismissedRuntimeSignature] = useState<string | null>(null);
@@ -350,9 +426,20 @@ function PooledIframe({
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       if (e.source !== iframeRef.current?.contentWindow) return;
-      const d = e.data as
-        | (InteractivePickerMessage & { errorKind?: string; message?: unknown })
-        | undefined;
+      const d = e.data as IframeHostMessage | undefined;
+      // A game result carries neither `kind` nor `__maicInteractive`, so it has
+      // to be consumed BEFORE the guard below, which would drop it.
+      if (
+        handleGameResultMessage(
+          sceneId,
+          stageId,
+          entry.srcDoc !== undefined,
+          d,
+          gameResultSeen.current,
+        )
+      ) {
+        return;
+      }
       if (!d || d.__maicInteractive !== true) return;
       if (d.kind === 'runtime-error') {
         const kind = typeof d.errorKind === 'string' ? d.errorKind : 'error';
@@ -378,7 +465,16 @@ function PooledIframe({
     window.addEventListener('message', onMessage);
     iframeRef.current?.contentWindow?.postMessage({ __maicErrorReplayRequest: true }, '*');
     return () => window.removeEventListener('message', onMessage);
-  }, [sceneId, entry.srcDoc, effectiveMode, onPlaybackCancel, onPlaybackPick, playbackArmed, t]);
+  }, [
+    sceneId,
+    entry.srcDoc,
+    effectiveMode,
+    onPlaybackCancel,
+    onPlaybackPick,
+    playbackArmed,
+    stageId,
+    t,
+  ]);
 
   // A content change reloads the iframe; drop the previous render's errors so the
   // captured set reflects the CURRENT page (e.g. after the agent applies a fix).

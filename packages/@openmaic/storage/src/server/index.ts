@@ -296,7 +296,7 @@ async function rethrowClassifiedSessionWriteFailure(
   sessionId: string,
   error: unknown,
 ): Promise<never> {
-  if (error instanceof RuntimeAppendConflictError) throw error;
+  if (isAppendConflict(error)) throw error;
   let current: RuntimeSession | undefined;
   try {
     current = await existingSessionOwnedByPrincipal(store, principal, sessionId);
@@ -381,6 +381,32 @@ function isStageNotFound(error: unknown): boolean {
   );
 }
 
+/**
+ * Recognize a compare-and-append conflict.
+ *
+ * The class check is the fast path; `name` + `code` carries recognition for a
+ * store raised through a second instance of this package, which is exactly the
+ * case {@link isSessionExists} and {@link isStageNotFound} already cover. The
+ * three fields are required in that fallback because `mappedError` copies them
+ * into the 409 body, and a response whose `details` disagree with its `code`
+ * is worse than a generic one.
+ */
+function isAppendConflict(error: unknown): error is RuntimeAppendConflictError {
+  if (error instanceof RuntimeAppendConflictError) return true;
+  if (!(error instanceof Error) || error.name !== 'RuntimeAppendConflictError') return false;
+  if ((error as { code?: unknown }).code !== 'RUNTIME_APPEND_CONFLICT') return false;
+  const { sessionId, expectedLastSeq, actualLastSeq } = error as {
+    sessionId?: unknown;
+    expectedLastSeq?: unknown;
+    actualLastSeq?: unknown;
+  };
+  return (
+    typeof sessionId === 'string' &&
+    (expectedLastSeq === null || Number.isSafeInteger(expectedLastSeq)) &&
+    (actualLastSeq === null || Number.isSafeInteger(actualLastSeq))
+  );
+}
+
 function mappedError(error: unknown): {
   status: number;
   body: ErrorBody;
@@ -394,7 +420,7 @@ function mappedError(error: unknown): {
       headers: policy.headers,
     };
   }
-  if (error instanceof RuntimeAppendConflictError) {
+  if (isAppendConflict(error)) {
     return {
       status: 409,
       body: {
@@ -742,7 +768,7 @@ export function createRuntimeHttpHandler(
       }
       if (
         (!(error instanceof RuntimeHttpError) || error.status >= 500) &&
-        !(error instanceof RuntimeAppendConflictError) &&
+        !isAppendConflict(error) &&
         !isStageNotFound(error)
       ) {
         console.error('@openmaic/storage: Runtime HTTP handler internal error', error);
