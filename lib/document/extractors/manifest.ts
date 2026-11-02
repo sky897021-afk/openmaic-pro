@@ -29,7 +29,9 @@ import {
   MINERU_CLOUD_MIMES,
   MINERU_SELFHOST_MIMES,
   PLAIN_TEXT_MIMES,
+  LOCAL_DOCUMENT_MIMES,
   LOCAL_FFMPEG_MEDIA_MIMES,
+  VISION_OCR_MIMES,
 } from '../mime';
 import type { DocumentExtractorCapabilities, MediaExtractorCapabilities } from '../types';
 
@@ -54,8 +56,9 @@ export interface MediaExtractorManifestEntry {
 /**
  * Document extractor metadata. Insertion order IS the auto-selection order and
  * must stay identical to the registry's provider order (`text.ts` first, then
- * `pdf.ts` in `PDF_PROVIDERS` key order) so client-side expected-extractor
- * resolution picks the same provider the server would.
+ * this manifest's local Office entry, then `pdf.ts` in `PDF_PROVIDERS` key
+ * order) so client-side expected-extractor resolution picks the same provider
+ * the server would.
  */
 const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry> = {
   'plain-text': {
@@ -67,6 +70,26 @@ const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry
       text: true,
       images: false,
       tables: false,
+      formulas: false,
+      layout: false,
+      ocr: false,
+      async: false,
+    },
+  },
+  // Local Office. Ahead of the cloud extractors on purpose: these formats carry
+  // their own text and need no credential, so auto-selection must pick this
+  // rather than resolving to an unconfigured MinerU/AliDocMind deployment.
+  // Covers modern OOXML (docx/pptx/xlsx), legacy OLE (doc/xls) and CSV. Text
+  // and tables are extracted; embedded images, charts and equations are NOT.
+  'local-document': {
+    id: 'local-document',
+    displayName: 'Local document',
+    version: '1',
+    supportedMimeTypes: LOCAL_DOCUMENT_MIMES,
+    capabilities: {
+      text: true,
+      images: false,
+      tables: true,
       formulas: false,
       layout: false,
       ocr: false,
@@ -131,6 +154,28 @@ const DOCUMENT_EXTRACTOR_MANIFEST: Record<string, DocumentExtractorManifestEntry
       layout: true,
       ocr: true,
       async: true,
+    },
+  },
+  // Deliberately LAST: insertion order is the auto-selection order, so it must
+  // never pre-empt `unpdf` for a text PDF (which would be a silent regression)
+  // or the cloud providers for a format only they handle. A caller selects it
+  // explicitly, or the background path falls through to it after the others
+  // fail. Capabilities mirror what the local rasterizer + a vision model can
+  // actually produce: prose, markdown tables and LaTeX formulas, no layout
+  // analysis.
+  'vision-ocr': {
+    id: 'vision-ocr',
+    displayName: 'Vision OCR',
+    version: '1',
+    supportedMimeTypes: VISION_OCR_MIMES,
+    capabilities: {
+      text: true,
+      images: true,
+      tables: true,
+      formulas: true,
+      layout: false,
+      ocr: true,
+      async: false,
     },
   },
 };

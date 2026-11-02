@@ -98,3 +98,14 @@ export function resolveConfiguredLearnerKey(): Promise<string> | undefined {
   const provider = options?.learnerKey;
   return provider ? Promise.resolve().then(provider) : undefined;
 }
+
+/**
+ * @internal Read the configured learner-key provider WITHOUT sealing resolution.
+ *
+ * `getLearnerKey(kv)` needs to know whether a server-derived identity exists
+ * before it decides to mint an anonymous device key; sealing there would make a
+ * later bootstrap impossible.
+ */
+export function getConfiguredLearnerKeyProvider(): (() => string | Promise<string>) | undefined {
+  return options?.learnerKey;
+}

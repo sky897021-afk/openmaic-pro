@@ -3,7 +3,12 @@ import {
   hydratePBLScenesFromRuntime,
   type HydratePBLProjectArgs,
 } from '@/lib/pbl/v2/runtime/hydration';
-import { isCurrentStageSceneLoadToken, type StageSceneLoadToken } from '@/lib/store/stage';
+import {
+  captureStageContentRevision,
+  isCurrentStageSceneLoadToken,
+  isStageContentRevisionCurrent,
+  type StageSceneLoadToken,
+} from '@/lib/store/stage';
 import type { ChatSession } from '@/lib/types/chat';
 import type { Scene, Stage } from '@/lib/types/stage';
 import {
@@ -67,11 +72,16 @@ export async function applyHydratedClassroomFallbackScenes({
   }),
   applyStageAndScenes,
 }: ApplyHydratedClassroomFallbackScenesArgs): Promise<boolean> {
+  const contentRevision = captureStageContentRevision();
   const [hydrated, chatState] = await Promise.all([
     hydrateScenes(stage.id, scenes),
     hydrateChats(stage.id),
   ]);
-  if (!isCurrent() || !isCurrentStageSceneLoadToken(loadToken)) {
+  if (
+    !isCurrent() ||
+    !isCurrentStageSceneLoadToken(loadToken) ||
+    !isStageContentRevisionCurrent(contentRevision)
+  ) {
     return false;
   }
   applyStageAndScenes(stage, hydrated, chatState);

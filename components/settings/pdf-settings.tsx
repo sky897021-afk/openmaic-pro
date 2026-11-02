@@ -24,6 +24,7 @@ function getFeatureLabel(feature: string, t: (key: string) => string): string {
     formulas: t('settings.featureFormulas'),
     'layout-analysis': t('settings.featureLayoutAnalysis'),
     metadata: t('settings.featureMetadata'),
+    ocr: t('settings.featureOcr'),
   };
   return labels[feature] || feature;
 }
@@ -50,8 +51,9 @@ export function PDFSettings({ selectedProviderId }: PDFSettingsProps) {
   const isCloud = selectedProviderId === 'mineru-cloud';
   const isSelfHosted = selectedProviderId === 'mineru';
   const isAliDocMind = selectedProviderId === 'alidocmind';
+  const isVisionOcr = selectedProviderId === 'vision-ocr';
   const hasAccessKeys = !!providerConfig?.accessKeyId && !!providerConfig?.accessKeySecret;
-  const needsRemoteConfig = isSelfHosted || isCloud || isAliDocMind;
+  const needsRemoteConfig = isSelfHosted || isCloud || isAliDocMind || isVisionOcr;
 
   // For cloud: test requires API key (user-entered or server-configured);
   // for AliDocMind: requires AK + SK; for self-hosted: requires base URL.
@@ -233,6 +235,90 @@ export function PDFSettings({ selectedProviderId }: PDFSettingsProps) {
               </>
             )}
 
+            {/* Vision OCR's extraction IS a model call, so what it needs is a
+                model — plus, optionally, that model's own endpoint and key
+                (both empty ⇒ the server-managed model for the OCR stage). */}
+            {isVisionOcr && (
+              <>
+                <div className="space-y-2 col-span-2">
+                  <Label className="text-sm">
+                    {t('settings.pdfModel')}
+                    <span className="text-muted-foreground ml-1 font-normal">
+                      ({t('settings.optional')})
+                    </span>
+                  </Label>
+                  <Input
+                    name={`pdf-model-${selectedProviderId}`}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    placeholder={t('settings.pdfModelPlaceholder')}
+                    value={providerConfig?.model || ''}
+                    onChange={(e) =>
+                      setPDFProviderConfig(selectedProviderId, { model: e.target.value })
+                    }
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">{t('settings.visionOcrNote')}</p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-sm">
+                    {t('settings.pdfBaseUrl')}
+                    <span className="text-muted-foreground ml-1 font-normal">
+                      ({t('settings.optional')})
+                    </span>
+                  </Label>
+                  <Input
+                    name={`pdf-base-url-${selectedProviderId}`}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    placeholder="https://api.openai.com/v1"
+                    value={providerConfig?.baseUrl || ''}
+                    onChange={(e) =>
+                      setPDFProviderConfig(selectedProviderId, { baseUrl: e.target.value })
+                    }
+                    className="text-sm"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-sm">
+                    {t('settings.pdfApiKey')}
+                    <span className="text-muted-foreground ml-1 font-normal">
+                      ({t('settings.optional')})
+                    </span>
+                  </Label>
+                  <div className="relative">
+                    <Input
+                      name={`pdf-api-key-${selectedProviderId}`}
+                      type={showApiKey ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      placeholder={t('settings.enterApiKey')}
+                      value={providerConfig?.apiKey || ''}
+                      onChange={(e) =>
+                        setPDFProviderConfig(selectedProviderId, { apiKey: e.target.value })
+                      }
+                      className="font-mono text-sm pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
             {/* Base URL */}
             {(isSelfHosted || isCloud) && (
               <div className="space-y-2">
@@ -338,6 +424,9 @@ export function PDFSettings({ selectedProviderId }: PDFSettingsProps) {
 
           {/* Request URL Preview */}
           {(() => {
+            // Vision OCR posts to whatever endpoint the LLM provider uses, not
+            // to a parser API — there is no parse URL worth previewing.
+            if (isVisionOcr) return null;
             if (isAliDocMind) {
               const base = providerConfig?.baseUrl || 'docmind-api.cn-hangzhou.aliyuncs.com';
               return (

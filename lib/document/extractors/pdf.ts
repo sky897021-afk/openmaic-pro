@@ -1,5 +1,6 @@
 import { parseWithMinerUCloud } from '@/lib/pdf/mineru-cloud';
 import { parsePDF, parseWithMinerUDocument } from '@/lib/pdf/pdf-providers';
+import { parseWithVisionOCR } from '@/lib/pdf/vision-ocr';
 import { PDF_PROVIDERS } from '@/lib/pdf/constants';
 import type { PDFProviderId } from '@/lib/pdf/types';
 import { DOCUMENT_MIME_TYPES } from '../mime';
@@ -29,6 +30,7 @@ function createPdfBackedDocumentExtractor(id: PDFProviderId): DocumentExtractorP
         providerId: id,
         apiKey: input.config.apiKey,
         baseUrl: input.config.baseUrl,
+        model: input.config.model,
         accessKeyId: input.config.accessKeyId,
         accessKeySecret: input.config.accessKeySecret,
         allowEnvFallback: input.config.allowEnvFallback,
@@ -39,6 +41,14 @@ function createPdfBackedDocumentExtractor(id: PDFProviderId): DocumentExtractorP
       if (id === 'alidocmind') {
         // AliDocMind handles pdf/docx/pptx/xlsx/images through one flow.
         parsed = await parsePDF(config, input.buffer, {
+          fileName: input.fileName,
+          mimeType: input.mimeType,
+        });
+      } else if (id === 'vision-ocr') {
+        // Text layer locally, model for the pages without one. Handles both
+        // PDFs and images, so it must not fall through to the MinerU branch
+        // below for a non-PDF MIME.
+        parsed = await parseWithVisionOCR(config, input.buffer, {
           fileName: input.fileName,
           mimeType: input.mimeType,
         });

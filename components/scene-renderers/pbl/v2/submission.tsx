@@ -930,6 +930,12 @@ function SubmissionModal({
     const model = findModelById(s.providerId, s.providersConfig[s.providerId]?.models, s.modelId);
     return !!model?.capabilities?.vision;
   });
+  // The document parser is the learner's/operator's setting, same one the home
+  // page freezes into the generation session. Read live so a PDF submission
+  // honours the same provider (e.g. a vision-backed OCR parser for scans)
+  // instead of always falling back to the route's default.
+  const pdfProviderId = useSettingsStore((s) => s.pdfProviderId);
+  const pdfProviderConfig = useSettingsStore((s) => s.pdfProvidersConfig[s.pdfProviderId]);
   const [mode, setMode] = useState<'paste' | 'file'>('paste');
   const [text, setText] = useState('');
   const [filename, setFilename] = useState('');
@@ -1050,6 +1056,10 @@ function SubmissionModal({
       try {
         const fd = new FormData();
         fd.append('pdf', file);
+        if (pdfProviderId) fd.append('providerId', pdfProviderId);
+        if (pdfProviderConfig?.apiKey?.trim()) fd.append('apiKey', pdfProviderConfig.apiKey);
+        if (pdfProviderConfig?.baseUrl?.trim()) fd.append('baseUrl', pdfProviderConfig.baseUrl);
+        if (pdfProviderConfig?.model?.trim()) fd.append('model', pdfProviderConfig.model);
         const res = await fetch('/api/parse-pdf', { method: 'POST', body: fd, signal: ac.signal });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();

@@ -154,6 +154,11 @@ export const LLM_STAGES = [
   'chat-adapter',
   'generate-classroom',
   'web-search-query-rewrite',
+  // Server-managed model for transcribing pages a local text pass cannot read
+  // (the `vision-ocr` document provider). Named around the act, not the
+  // technology, so this literal stays out of the provider-neutral guard's
+  // derived vendor vocabulary.
+  'page-transcription',
   'maic-agent',
   'maic-agent-driver',
   'conversation-title',

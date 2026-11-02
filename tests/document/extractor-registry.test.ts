@@ -10,7 +10,7 @@ import {
   getDocumentExtractorManifestEntries,
   getMediaExtractorManifestEntries,
 } from '@/lib/document/extractors/manifest';
-import { PROVIDER_SUPPORTED_MIME_TYPES } from '@/lib/document/mime';
+import { DOCUMENT_MIME_TYPES, PROVIDER_SUPPORTED_MIME_TYPES } from '@/lib/document/mime';
 
 describe('document extractor registry', () => {
   it('declares a non-empty version on every registered document and media provider', () => {
@@ -26,15 +26,17 @@ describe('document extractor registry', () => {
 
     expect(providers.map((provider) => provider.id)).toEqual([
       'plain-text',
+      'local-document',
       'unpdf',
       'mineru',
       'mineru-cloud',
       'alidocmind',
+      'vision-ocr',
     ]);
     expect(providers.every((provider) => provider.supportedMimeTypes)).toBe(true);
     expect(
       providers
-        .filter((provider) => provider.id !== 'plain-text')
+        .filter((provider) => provider.id !== 'plain-text' && provider.id !== 'local-document')
         .every((provider) => provider.supportedMimeTypes.includes('application/pdf')),
     ).toBe(true);
   });
@@ -57,6 +59,47 @@ describe('document extractor registry', () => {
       ocr: false,
       async: false,
     });
+  });
+
+  it('exposes a local Office extractor and prefers it over the cloud providers', () => {
+    const local = getDocumentExtractorProvider('local-document');
+
+    expect(local).toBeDefined();
+    expect(local?.supportedMimeTypes).toEqual([
+      DOCUMENT_MIME_TYPES.docx,
+      DOCUMENT_MIME_TYPES.pptx,
+      DOCUMENT_MIME_TYPES.xlsx,
+      DOCUMENT_MIME_TYPES.xls,
+      DOCUMENT_MIME_TYPES.doc,
+      DOCUMENT_MIME_TYPES.csv,
+    ]);
+    expect(local?.capabilities).toMatchObject({
+      text: true,
+      images: false,
+      tables: true,
+      formulas: false,
+      layout: false,
+      ocr: false,
+      async: false,
+    });
+    // These formats carry their own text. Auto-selection must not resolve them
+    // to an unconfigured MinerU/AliDocMind deployment, which would make every
+    // Office/CSV upload fail with a credentials error.
+    for (const mimeType of [
+      DOCUMENT_MIME_TYPES.docx,
+      DOCUMENT_MIME_TYPES.pptx,
+      DOCUMENT_MIME_TYPES.xlsx,
+      DOCUMENT_MIME_TYPES.xls,
+      DOCUMENT_MIME_TYPES.doc,
+      DOCUMENT_MIME_TYPES.csv,
+    ]) {
+      expect(
+        selectDocumentExtractorProvider({
+          mimeType,
+          requiredCapabilities: { text: true },
+        }).id,
+      ).toBe('local-document');
+    }
   });
 
   it('declares MinerU capabilities and supported course material formats', () => {
@@ -155,14 +198,7 @@ describe('document extractor registry', () => {
     ).toThrow(/No document extractor supports MIME type/);
   });
 
-  it('can capability-match Office course material to MinerU', () => {
-    expect(
-      selectDocumentExtractorProvider({
-        mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        requiredCapabilities: { text: true },
-      }).id,
-    ).toBe('mineru');
-
+  it('can capability-match Office course material to an explicit cloud provider', () => {
     expect(
       selectDocumentExtractorProvider({
         mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -170,6 +206,17 @@ describe('document extractor registry', () => {
         requiredCapabilities: { text: true },
       }).id,
     ).toBe('mineru-cloud');
+  });
+
+  it('keeps a format only MinerU advertises on MinerU', () => {
+    // JP2 is outside AliDocMind's contract and vision-ocr only reads the raster
+    // formats it can send to a model — MinerU is the only auto candidate.
+    expect(
+      selectDocumentExtractorProvider({
+        mimeType: 'image/jp2',
+        requiredCapabilities: { text: true },
+      }).id,
+    ).toBe('mineru');
   });
 
   it('can capability-match text course material locally', () => {

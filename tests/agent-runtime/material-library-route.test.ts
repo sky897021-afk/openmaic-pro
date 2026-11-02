@@ -67,6 +67,7 @@ describe('GET /api/materials/library', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
+      knowledgeAvailable: false,
       materials: [
         {
           materialId: 'mat_00000000000000000000000000',
@@ -75,6 +76,7 @@ describe('GET /api/materials/library', () => {
           bytes: 5,
           originalName: '讲义.md',
           extraction: { status: 'idle' },
+          knowledge: { available: false, state: 'none' },
           createdAt: '2023-11-14T22:13:20.000Z',
         },
       ],
@@ -116,7 +118,7 @@ describe('GET /api/materials/library', () => {
     const response = await GET(new NextRequest('http://localhost/api/materials/library'));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ materials: [] });
+    await expect(response.json()).resolves.toEqual({ knowledgeAvailable: false, materials: [] });
   });
 
   it('answers 404 when the agent runtime is not configured', async () => {

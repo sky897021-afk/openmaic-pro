@@ -323,6 +323,7 @@ describe('skills runner registration', () => {
       'rename_stage',
       'search_chats',
       'search_classrooms',
+      'search_knowledge_base',
       'search_material',
       'set_roster',
       'use_material_media',

@@ -229,7 +229,7 @@ export async function extractClaimedSessionMaterial(
   let selected: DocumentExtractorProvider | undefined;
   for (const provider of candidates) {
     try {
-      artifact = await provider.extract({
+      const candidate = await provider.extract({
         buffer: raw.bytes,
         fileName: source.title ?? undefined,
         fileSize: raw.bytes.byteLength,
@@ -242,6 +242,18 @@ export async function extractClaimedSessionMaterial(
           managed: true,
         },
       });
+      // "Resolved" is not the same as "read the file": a text-layer extractor
+      // answers an image-only scan successfully and with nothing in it. Letting
+      // that win would index the material as empty and never give a second
+      // candidate (a vision-backed parser) its turn — the same rule
+      // `index-material.ts` applies. Nothing is carried over from the empty
+      // attempt: if every candidate comes back empty the extraction fails
+      // loudly rather than storing a blank document.
+      if (!artifactText(candidate).trim()) {
+        errors.push(`${provider.id}: produced no text`);
+        continue;
+      }
+      artifact = candidate;
       selected = provider;
       break;
     } catch (error) {

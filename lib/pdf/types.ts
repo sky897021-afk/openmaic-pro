@@ -5,7 +5,7 @@
 /**
  * PDF Provider IDs
  */
-export type PDFProviderId = 'unpdf' | 'mineru' | 'mineru-cloud' | 'alidocmind';
+export type PDFProviderId = 'unpdf' | 'mineru' | 'mineru-cloud' | 'alidocmind' | 'vision-ocr';
 
 /**
  * PDF Provider Configuration
@@ -24,8 +24,19 @@ export interface PDFProviderConfig {
  */
 export interface PDFParserConfig {
   providerId: PDFProviderId;
+  /**
+   * For cloud parsers this is the parser service's key. For `vision-ocr` it
+   * doubles as the language-model key (that provider IS a model call), so the
+   * existing settings form and route plumbing carry its credentials unchanged.
+   */
   apiKey?: string;
+  /** Parser service endpoint; for `vision-ocr`, the language-model endpoint. */
   baseUrl?: string;
+  /**
+   * Language model to transcribe pages with, for providers that call a model
+   * (`vision-ocr`). Empty falls back to server-managed model resolution.
+   */
+  model?: string;
   /** Aliyun AccessKey ID (AliDocMind) */
   accessKeyId?: string;
   /** Aliyun AccessKey Secret (AliDocMind) */

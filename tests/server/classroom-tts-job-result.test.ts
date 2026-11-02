@@ -3,7 +3,9 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import type { GenerateClassroomResult } from '@/lib/server/classroom-generation';
 
-const jobsDir = vi.hoisted(() => `/tmp/openmaic-1567-jobs-${process.pid}-${Date.now()}`);
+const jobsDir = vi.hoisted(
+  () => `${process.cwd()}/.tmp/openmaic-1567-jobs-${process.pid}-${Date.now()}`,
+);
 
 vi.mock('@/lib/server/classroom-storage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/server/classroom-storage')>();

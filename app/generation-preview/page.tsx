@@ -53,6 +53,8 @@ import type {
 } from '@/lib/types/generation';
 import { AgentRevealModal } from '@/components/agent/agent-reveal-modal';
 import { createLogger } from '@/lib/logger';
+import { reportHandoffResult } from '@/lib/integration/handoff-client';
+import { injectHandoffReferencePanel } from '@/lib/integration/handoff-scene';
 import {
   type GenerationSessionState,
   ALL_STEPS,
@@ -349,6 +351,7 @@ function GenerationPreviewContent() {
                   baseUrl?: string;
                   accessKeyId?: string;
                   accessKeySecret?: string;
+                  model?: string;
                 };
               }
             ).providerConfig;
@@ -372,6 +375,9 @@ function GenerationPreviewContent() {
             }
             if (providerConfig?.accessKeySecret?.trim()) {
               parseFormData.append('accessKeySecret', providerConfig.accessKeySecret);
+            }
+            if (providerConfig?.model?.trim()) {
+              parseFormData.append('model', providerConfig.model);
             }
             const parseResponse = await fetch('/api/extract-document', {
               method: 'POST',
@@ -679,8 +685,11 @@ function GenerationPreviewContent() {
 
         // Mid-stream review intent (sticky ref) overrides the auto-continue timer.
         const userOpenedReviewEarly = outlineReviewIntentRef.current;
+        // A platform handoff already has a confirmed prompt and materials; do
+        // not stop for an outline review the teacher did not ask for.
         const shouldReviewOutlines =
-          useSettingsStore.getState().reviewOutlineEnabled || userOpenedReviewEarly;
+          !currentSession.handoffId &&
+          (useSettingsStore.getState().reviewOutlineEnabled || userOpenedReviewEarly);
         const updatedSession: GenerationSessionState = {
           ...currentSession,
           sceneOutlines: outlines,
@@ -695,7 +704,9 @@ function GenerationPreviewContent() {
 
         setStatusMessage(shouldReviewOutlines ? '' : t('generation.reviewOutlineAutoContinue'));
         setIsConfirmingOutlines(false);
-        outlines = await waitForOutlineReviewChoice(outlines, shouldReviewOutlines, signal);
+        outlines = currentSession.handoffId
+          ? outlines
+          : await waitForOutlineReviewChoice(outlines, shouldReviewOutlines, signal);
         clearOutlineReviewTimer();
         currentSession = {
           ...currentSession,
@@ -743,7 +754,9 @@ function GenerationPreviewContent() {
         persona?: string;
       }> = [];
 
-      if (settings.agentMode === 'auto') {
+      // Handoff sessions skip role generation: the platform already froze the
+      // prompt, and the extra model call only adds latency and a failure point.
+      if (!currentSession.handoffId && settings.agentMode === 'auto') {
         const agentStepIdx = activeSteps.findIndex((s) => s.id === 'agent-generation');
         if (agentStepIdx >= 0) setCurrentStepIndex(agentStepIdx);
 
@@ -1012,6 +1025,23 @@ function GenerationPreviewContent() {
       }
       const firstScene = data.scene;
 
+      // Module 2 (option B): a handoff game is generated from text, and the
+      // game prompt has no image variables. Keep the source figures and
+      // rasterized pages one click away in a reference drawer without altering
+      // the game itself. Normal generation is untouched.
+      if (currentSession.handoffId && firstScene.type === 'interactive') {
+        const sceneContent = firstScene.content as unknown as {
+          type?: string;
+          html?: unknown;
+        };
+        if (sceneContent?.type === 'interactive' && typeof sceneContent.html === 'string') {
+          sceneContent.html = injectHandoffReferencePanel(
+            sceneContent.html,
+            currentSession.pdfImages ?? [],
+          );
+        }
+      }
+
       // Generate TTS for first scene (part of actions step — blocking)
       if (
         settings.ttsEnabled &&
@@ -1051,6 +1081,10 @@ function GenerationPreviewContent() {
 
       sessionStorage.removeItem('generationSession');
       await store.saveToStorage();
+      // Module 2: tell the platform handoff which stage this produced. The
+      // helper is a no-op unless the landing stored a handoff id; it never
+      // throws, so it cannot block the classroom navigation.
+      await reportHandoffResult(stage.id);
       router.push(`/classroom/${stage.id}`);
     } catch (err) {
       setIsOutlineStreaming(false);

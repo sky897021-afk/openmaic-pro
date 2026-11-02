@@ -310,6 +310,11 @@ export interface SettingsState {
       accessKeyId?: string;
       /** Aliyun AccessKey Secret (AliDocMind). */
       accessKeySecret?: string;
+      /**
+       * Language model to transcribe with, for providers whose extraction is a
+       * model call (`vision-ocr`). Empty means the server-managed model.
+       */
+      model?: string;
     }
   >;
   baiduSubSources: BaiduSubSources;
@@ -505,6 +510,7 @@ export interface SettingsState {
       enabled: boolean;
       accessKeyId: string;
       accessKeySecret: string;
+      model: string;
     }>,
   ) => void;
 
@@ -715,6 +721,9 @@ const getDefaultPDFConfig = () => ({
     mineru: { apiKey: '', baseUrl: '', enabled: false },
     'mineru-cloud': { apiKey: '', baseUrl: '', enabled: false },
     alidocmind: { apiKey: '', baseUrl: '', enabled: false, accessKeyId: '', accessKeySecret: '' },
+    // Credentials are optional: leaving `model` empty falls back to the
+    // server-managed model for the OCR stage.
+    'vision-ocr': { apiKey: '', baseUrl: '', enabled: false, model: '' },
   } as Record<
     PDFProviderId,
     {
@@ -723,6 +732,7 @@ const getDefaultPDFConfig = () => ({
       enabled: boolean;
       accessKeyId?: string;
       accessKeySecret?: string;
+      model?: string;
     }
   >,
 });

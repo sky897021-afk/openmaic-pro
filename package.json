@@ -13,7 +13,8 @@
     "gen:video-export-katex": "node scripts/generate-video-export-katex.mjs",
     "gen:video-export-noto-cjk": "node scripts/generate-video-export-noto-cjk.mjs",
     "gen:video-export-noto-script-fonts": "node scripts/generate-video-export-noto-script-fonts.mjs",
-    "dev": "next dev",
+    "dev": "node scripts/dev-with-postgres.mjs",
+    "dev:3003": "pnpm dev -- -p 3003",
     "build": "node scripts/assert-vendor-maic-importer.mjs && next build",
     "start": "next start",
     "lint": "eslint",
@@ -145,6 +146,7 @@
     "react-colorful": "^5.7.0",
     "react-dom": "19.2.3",
     "react-i18next": "^17.0.1",
+    "remark-cjk-friendly": "^2.3.1",
     "sanitize-html": "2.17.0",
     "shadcn": "^3.6.3",
     "sharp": "0.35.4",
@@ -163,9 +165,10 @@
     "undici": "7.29.0",
     "unpdf": "^1.4.0",
     "use-stick-to-bottom": "^1.1.1",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5",
     "zod": "^4.3.5",
-    "zustand": "^5.0.10",
-    "remark-cjk-friendly": "^2.3.1"
+    "zustand": "^5.0.10"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.16",

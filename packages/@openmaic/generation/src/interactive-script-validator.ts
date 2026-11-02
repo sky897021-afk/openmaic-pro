@@ -6,6 +6,16 @@ export interface InteractiveScriptSyntaxFailure {
   readonly message: string;
 }
 
+export type InteractiveScriptFailure =
+  | ({
+      readonly code: 'syntax';
+    } & InteractiveScriptSyntaxFailure)
+  | {
+      readonly code: 'undefined-start-handler';
+      readonly scriptIndex: null;
+      readonly message: string;
+    };
+
 /**
  * Classic script type essences. Empty means the type attribute was omitted.
  * The rest are the JavaScript MIME type essences browsers still execute,
@@ -108,6 +118,43 @@ function extractScriptElements(markup: string): ScriptElement[] {
   return scripts;
 }
 
+function hasInlineStartGameCall(parent: DefaultTreeAdapterTypes.ParentNode): boolean {
+  for (const child of parent.childNodes) {
+    if (!isElement(child)) continue;
+    if (child.tagName === 'script' || isTemplate(child)) continue;
+    for (const attribute of child.attrs) {
+      if (
+        attribute.name.toLowerCase().startsWith('on') &&
+        /\bstartGame\s*\(\s*\)/.test(attribute.value)
+      ) {
+        return true;
+      }
+    }
+    if (hasInlineStartGameCall(child)) return true;
+  }
+  return false;
+}
+
+function definesClassicStartGame(source: string): boolean {
+  return (
+    /\bfunction\s+startGame\s*\(/.test(source) ||
+    /\b(?:var|let|const)\s+startGame\s*=(?!=)/.test(source) ||
+    /\bstartGame\s*=(?!=)/.test(source)
+  );
+}
+
+function definesModuleGlobalStartGame(source: string): boolean {
+  return /\b(?:window|globalThis)\s*\.\s*startGame\s*=(?!=)/.test(source);
+}
+
+function hasUnknownExternalScript(scripts: readonly ScriptElement[]): boolean {
+  return scripts.some((script) => {
+    if (!script.executable || !script.attributes.has('src')) return false;
+    const type = classicScriptType(script.attributes);
+    return type === 'module' || CLASSIC_JAVASCRIPT_TYPES.has(type);
+  });
+}
+
 function classicScriptType(attributes: ReadonlyMap<string, string>): string {
   const raw = (attributes.get('type') ?? '').trim().toLowerCase();
   // MIME parameters (`text/javascript; charset=utf-8`) are not part of the type.
@@ -153,4 +200,43 @@ export function findInteractiveScriptSyntaxFailure(
     if (message) return { scriptIndex: index + 1, message };
   }
   return null;
+}
+
+/**
+ * Reject the specific inert-widget shape we have observed from the model: an
+ * inline start button calls `startGame()` but the generated script only defines
+ * a differently named launcher. We intentionally limit this semantic check to
+ * `startGame`; a broad event-handler parser would produce false positives for
+ * inline form variables, `event`, and externally supplied handlers.
+ *
+ * External scripts are treated as unknown because their source is unavailable.
+ * Syntax remains the first failure so a malformed script reports its exact
+ * script index.
+ */
+export function findInteractiveScriptFailure(html: string): InteractiveScriptFailure | null {
+  const syntaxFailure = findInteractiveScriptSyntaxFailure(html);
+  if (syntaxFailure) return { code: 'syntax', ...syntaxFailure };
+
+  if (!hasInlineStartGameCall(parse(html))) return null;
+  const scripts = extractScriptElements(html);
+  if (hasUnknownExternalScript(scripts)) return null;
+
+  for (const script of scripts) {
+    if (!script.executable) continue;
+    const type = classicScriptType(script.attributes);
+    if (script.attributes.has('src')) continue;
+    if (type === 'module') {
+      if (definesModuleGlobalStartGame(script.source)) return null;
+      continue;
+    }
+    if (CLASSIC_JAVASCRIPT_TYPES.has(type) && definesClassicStartGame(script.source)) {
+      return null;
+    }
+  }
+
+  return {
+    code: 'undefined-start-handler',
+    scriptIndex: null,
+    message: 'Inline startGame() handler is called, but no executable script defines it',
+  };
 }

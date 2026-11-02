@@ -146,6 +146,7 @@ import { createLogger } from '@/lib/logger';
 import { extractMinerUResult } from './mineru-parser';
 import { parseWithMinerUCloud } from './mineru-cloud';
 import { parseWithAliDocMindClient } from './alidocmind-client';
+import { parseWithVisionOCR } from './vision-ocr';
 import { providerFetch, type ProviderFetchPolicy } from '@/lib/server/provider-fetch';
 
 const log = createLogger('PDFProviders');
@@ -245,6 +246,10 @@ export async function parsePDF(
 
     case 'alidocmind':
       result = await parseWithAliDocMind(config, pdfBuffer, options);
+      break;
+
+    case 'vision-ocr':
+      result = await parseWithVisionOCR(config, pdfBuffer, options);
       break;
 
     default:

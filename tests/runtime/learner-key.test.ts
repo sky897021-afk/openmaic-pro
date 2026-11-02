@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrowserKVStore } from '@openmaic/storage';
 
+import { configureRuntimeStorage, resetRuntimeStorageForTests } from '@/lib/runtime/config';
 import { getLearnerKey, LEARNER_KEY_KV_KEY } from '@/lib/runtime/learner-key';
 
 function memoryStorage(): Storage {
@@ -18,6 +19,10 @@ function memoryStorage(): Storage {
 }
 
 describe('getLearnerKey', () => {
+  afterEach(() => {
+    resetRuntimeStorageForTests();
+  });
+
   it('mints an anon key once and returns the same key afterwards', async () => {
     const kv = new BrowserKVStore({ storage: memoryStorage() });
     const first = await getLearnerKey(kv);
@@ -70,6 +75,25 @@ describe('getLearnerKey', () => {
     } as Storage;
 
     await expect(getLearnerKey(new BrowserKVStore({ storage }))).resolves.toBe(winner);
+  });
+
+  it('prefers the configured server learner key over an injected KV store', async () => {
+    // Under server persistence the stage owner is `openmaic-shared`; runtime
+    // callers pass a KV for local watermarks, not to opt out of that partition.
+    // Minting an `anon:` key here is refused by the HTTP runtime store with
+    // 403 FORBIDDEN_LEARNER.
+    const provider = vi.fn(() => 'openmaic-shared');
+    configureRuntimeStorage({ learnerKey: provider });
+    const storage = memoryStorage();
+    const kv = new BrowserKVStore({ storage });
+
+    await expect(getLearnerKey(kv)).resolves.toBe('openmaic-shared');
+    await expect(getLearnerKey(kv)).resolves.toBe('openmaic-shared');
+    expect(provider).toHaveBeenCalledTimes(1);
+
+    // No anonymous key was minted or persisted.
+    const entries = [...Array(storage.length).keys()].map((i) => storage.key(i));
+    expect(entries.some((key) => key?.includes(LEARNER_KEY_KV_KEY))).toBe(false);
   });
 });
 

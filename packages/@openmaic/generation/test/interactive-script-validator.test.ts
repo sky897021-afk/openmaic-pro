@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { findInteractiveScriptSyntaxFailure } from '../src/interactive-script-validator.js';
+import {
+  findInteractiveScriptFailure,
+  findInteractiveScriptSyntaxFailure,
+} from '../src/interactive-script-validator.js';
 
 describe('findInteractiveScriptSyntaxFailure', () => {
   it('accepts valid classic inline scripts', () => {
@@ -197,6 +200,72 @@ describe('findInteractiveScriptSyntaxFailure', () => {
     ).toMatchObject({
       scriptIndex: 2,
       message: expect.stringMatching(/Unexpected identifier 'counts'/),
+    });
+  });
+});
+
+describe('findInteractiveScriptFailure', () => {
+  it('rejects a start button whose startGame handler is not defined', () => {
+    expect(
+      findInteractiveScriptFailure(
+        [
+          '<html><body>',
+          '<button onclick="startGame()">Start</button>',
+          '<script>function launch() { document.body.dataset.started = "yes"; }</script>',
+          '</body></html>',
+        ].join(''),
+      ),
+    ).toEqual({
+      code: 'undefined-start-handler',
+      scriptIndex: null,
+      message: expect.stringMatching(/startGame/),
+    });
+  });
+
+  it.each([
+    ['function declaration', 'function startGame() { document.body.dataset.started = "yes"; }'],
+    ['global assignment', 'const launch = () => {}; window.startGame = launch;'],
+  ])('accepts an inline handler implemented by a %s', (_label, source) => {
+    expect(
+      findInteractiveScriptFailure(
+        `<button onclick="startGame()">Start</button><script>${source}</script>`,
+      ),
+    ).toBeNull();
+  });
+
+  it('accepts a click listener when no inline startGame call is present', () => {
+    expect(
+      findInteractiveScriptFailure(
+        '<button id="start">Start</button><script>document.querySelector("#start").addEventListener("click", launch); function launch() {}</script>',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read startGame text outside event handlers as a call', () => {
+    expect(
+      findInteractiveScriptFailure(
+        '<button data-help="Call startGame()">Start</button><script>const label = "startGame()";</script>',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not reject when an external script could define the handler', () => {
+    expect(
+      findInteractiveScriptFailure(
+        '<button onclick="startGame()">Start</button><script src="/game.js"></script>',
+      ),
+    ).toBeNull();
+  });
+
+  it('reports syntax before checking the start handler', () => {
+    expect(
+      findInteractiveScriptFailure(
+        '<button onclick="startGame()">Start</button><script>const broken = ;</script>',
+      ),
+    ).toMatchObject({
+      code: 'syntax',
+      scriptIndex: 1,
+      message: expect.stringMatching(/Unexpected token/),
     });
   });
 });

@@ -22,8 +22,14 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Whitelist: access-code endpoints, health check
-  if (pathname.startsWith('/api/access-code/') || pathname === '/api/health') {
+  // Whitelist: access-code endpoints, health check, and the server-to-server
+  // integration API (HMAC-authenticated by its own routes — a platform backend
+  // has no access-code cookie to present).
+  if (
+    pathname.startsWith('/api/access-code/') ||
+    pathname === '/api/health' ||
+    pathname.startsWith('/api/integration/v1/')
+  ) {
     return NextResponse.next();
   }
 

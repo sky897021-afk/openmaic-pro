@@ -101,6 +101,38 @@ const slideContent = {
   remark: 'Retry transient failures',
 };
 
+const visionSourceImages = [
+  {
+    id: 'img_1',
+    src: 'data:image/png;base64,AAAA',
+    pageNumber: 1,
+    width: 640,
+    height: 360,
+  },
+  {
+    id: 'img_2',
+    src: 'data:image/png;base64,BBBB',
+    pageNumber: 2,
+    width: 320,
+    height: 200,
+  },
+] as const;
+
+const visionSourceMapping = Object.fromEntries(
+  visionSourceImages.map((image) => [image.id, image.src]),
+);
+
+function useVisionModel() {
+  mocks.resolveModel.mockResolvedValue({
+    model: { id: 'vision-language-model' },
+    modelInfo: { capabilities: { vision: true } },
+    modelString: 'test:vision-model',
+    providerId: 'test',
+    apiKey: '',
+    serverManaged: true,
+  });
+}
+
 async function generateWithProgress(input: Partial<GenerateClassroomInput> = {}) {
   const progress: Array<{ step: string; progress: number; message: string }> = [];
   const { generateClassroom } = await import('@/lib/server/classroom-generation');
@@ -176,6 +208,198 @@ describe('classroom scene generation retries', () => {
     mocks.replaceMediaPlaceholders.mockImplementation(() => undefined);
     mocks.generateTTSForClassroom.mockResolvedValue({ written: 0, total: 0 });
     mocks.generateClassroomId.mockReturnValue('stagegen01');
+  });
+
+  it('passes the complete image context to outline generation and uses multimodal content', async () => {
+    useVisionModel();
+    mocks.generateSceneOutlinesFromRequirements.mockImplementation(
+      async (_requirements, _pdfText, _pdfImages, aiCall) => {
+        await aiCall('system', 'Inspect the source image', [visionSourceImages[1]]);
+        return {
+          success: true,
+          data: {
+            languageDirective: 'Use English.',
+            outlines: [outline],
+          },
+        };
+      },
+    );
+    const { generateClassicOutlines } = await import('@/lib/server/classroom-generation');
+
+    const plan = await generateClassicOutlines({
+      requirement: 'Teach from the uploaded source',
+      pdfContent: {
+        text: 'Source text',
+        images: visionSourceImages.map((image) => image.src),
+        pdfImages: [...visionSourceImages],
+        imageMapping: visionSourceMapping,
+      },
+    });
+
+    expect(plan.outlines).toEqual([outline]);
+    expect(mocks.generateSceneOutlinesFromRequirements).toHaveBeenCalledWith(
+      { requirement: 'Teach from the uploaded source' },
+      'Source text',
+      visionSourceImages,
+      expect.any(Function),
+      expect.objectContaining({
+        imageMapping: visionSourceMapping,
+        visionEnabled: true,
+      }),
+    );
+    const request = mocks.callLLM.mock.calls[0]?.[0];
+    expect(request.messages[1].content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'text', text: 'Inspect the source image' }),
+        expect.objectContaining({
+          type: 'image',
+          image: 'BBBB',
+          mimeType: 'image/png',
+        }),
+      ]),
+    );
+  });
+
+  it('falls back to a text-only outline call when the multimodal request fails', async () => {
+    useVisionModel();
+    mocks.callLLM
+      .mockRejectedValueOnce(new Error('vision transport failed'))
+      .mockResolvedValueOnce({ text: 'text-only response' });
+    mocks.generateSceneOutlinesFromRequirements.mockImplementation(
+      async (_requirements, _pdfText, _pdfImages, aiCall) => {
+        const response = await aiCall('system', 'Inspect the source image', [
+          visionSourceImages[0],
+        ]);
+        expect(response).toBe('text-only response');
+        return {
+          success: true,
+          data: {
+            languageDirective: 'Use English.',
+            outlines: [outline],
+          },
+        };
+      },
+    );
+    const { generateClassicOutlines } = await import('@/lib/server/classroom-generation');
+
+    await generateClassicOutlines({
+      requirement: 'Teach from the uploaded source',
+      pdfContent: {
+        text: 'Source text',
+        images: visionSourceImages.map((image) => image.src),
+        pdfImages: [...visionSourceImages],
+        imageMapping: visionSourceMapping,
+      },
+    });
+
+    expect(mocks.callLLM).toHaveBeenCalledTimes(2);
+    expect(mocks.callLLM.mock.calls[0][0].messages[1].content).toEqual(expect.any(Array));
+    expect(mocks.callLLM.mock.calls[1][0].messages[1].content).toBe('Inspect the source image');
+  });
+
+  it('keeps images textual when the configured outline model has no vision capability', async () => {
+    mocks.generateSceneOutlinesFromRequirements.mockImplementation(
+      async (_requirements, _pdfText, _pdfImages, aiCall) => {
+        await aiCall('system', 'Inspect the source image', [visionSourceImages[0]]);
+        return {
+          success: true,
+          data: {
+            languageDirective: 'Use English.',
+            outlines: [outline],
+          },
+        };
+      },
+    );
+    const { generateClassicOutlines } = await import('@/lib/server/classroom-generation');
+
+    await generateClassicOutlines({
+      requirement: 'Teach from the uploaded source',
+      pdfContent: {
+        text: 'Source text',
+        images: visionSourceImages.map((image) => image.src),
+        pdfImages: [...visionSourceImages],
+        imageMapping: visionSourceMapping,
+      },
+    });
+
+    expect(mocks.generateSceneOutlinesFromRequirements).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      visionSourceImages,
+      expect.any(Function),
+      expect.objectContaining({ visionEnabled: false }),
+    );
+    expect(mocks.callLLM).toHaveBeenCalledTimes(1);
+    expect(mocks.callLLM.mock.calls[0][0].messages[1].content).toBe('Inspect the source image');
+  });
+
+  it('assigns only the source images named by the scene outline', async () => {
+    useVisionModel();
+    const imageOutline = {
+      ...outline,
+      suggestedImageIds: ['img_2'],
+    };
+    mocks.generateSceneOutlinesFromRequirements.mockResolvedValue({
+      success: true,
+      data: {
+        languageDirective: 'Use English.',
+        outlines: [imageOutline],
+      },
+    });
+    mocks.generateSceneContent.mockResolvedValue(slideContent);
+
+    await generateWithProgress({
+      pdfContent: {
+        text: 'Source text',
+        images: visionSourceImages.map((image) => image.src),
+        pdfImages: [...visionSourceImages],
+        imageMapping: visionSourceMapping,
+      },
+    });
+
+    expect(mocks.generateSceneContent).toHaveBeenCalledWith(
+      imageOutline,
+      expect.any(Function),
+      expect.objectContaining({
+        assignedImages: [visionSourceImages[1]],
+        imageMapping: { img_2: visionSourceImages[1].src },
+        visionEnabled: true,
+      }),
+    );
+  });
+
+  it('reuses approved outlines while retaining image context for scene generation', async () => {
+    useVisionModel();
+    const approvedOutline = {
+      ...outline,
+      suggestedImageIds: ['img_2'],
+    };
+    mocks.generateSceneContent.mockResolvedValue(slideContent);
+
+    await generateWithProgress({
+      outlines: [approvedOutline],
+      courseTitle: 'Approved course',
+      languageDirective: 'Use English.',
+      pdfContent: {
+        text: 'Source text',
+        images: visionSourceImages.map((image) => image.src),
+        pdfImages: [...visionSourceImages],
+        imageMapping: visionSourceMapping,
+      },
+    });
+
+    expect(mocks.generateSceneOutlinesFromRequirements).not.toHaveBeenCalled();
+    expect(mocks.generateSceneContent).toHaveBeenCalledWith(
+      approvedOutline,
+      expect.any(Function),
+      expect.objectContaining({
+        assignedImages: [visionSourceImages[1]],
+        imageMapping: { img_2: visionSourceImages[1].src },
+        visionEnabled: true,
+      }),
+    );
+    const persisted = mocks.persistClassroom.mock.calls[0][0];
+    expect(persisted.stage.name).toBe('Approved course');
   });
 
   it('retries an empty scene content result before skipping the scene', async () => {

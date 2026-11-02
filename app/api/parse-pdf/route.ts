@@ -31,6 +31,7 @@ export async function POST(req: NextRequest) {
     const providerId = formData.get('providerId') as PDFProviderId | null;
     const apiKey = formData.get('apiKey') as string | null;
     const baseUrl = formData.get('baseUrl') as string | null;
+    const model = formData.get('model') as string | null;
 
     if (!pdfFile) {
       return apiError('MISSING_REQUIRED_FIELD', 400, 'No PDF file provided');
@@ -56,6 +57,10 @@ export async function POST(req: NextRequest) {
       providerId: effectiveProviderId,
       apiKey: resolvePDFApiKey(effectiveProviderId, managed ? undefined : apiKey || undefined),
       baseUrl: resolvePDFBaseUrl(effectiveProviderId, clientBaseUrl),
+      // The model is the caller's choice, not a credential — a managed
+      // provider never pins it. Empty leaves a model-backed provider
+      // (vision-ocr) to resolve a server-managed model itself.
+      model: (managed ? undefined : model) || undefined,
       managed,
     };
 

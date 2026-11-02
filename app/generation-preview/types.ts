@@ -30,6 +30,8 @@ export interface GenerationSessionState {
     baseUrl?: string;
     accessKeyId?: string;
     accessKeySecret?: string;
+    /** Language model for `vision-ocr`; empty ⇒ server-managed. */
+    model?: string;
   };
   // Web search context
   researchContext?: string;
@@ -40,6 +42,12 @@ export interface GenerationSessionState {
   courseTitle?: string;
   // Server-effective vocational mode from the outline generation done event.
   taskEngineMode?: boolean;
+  /**
+   * Module-2 platform handoff id. A handoff session already has a confirmed
+   * prompt and materials, so the preview must not stop for an outline review
+   * or spend a model call on classroom role generation.
+   */
+  handoffId?: string;
 }
 
 export type GenerationStep = {

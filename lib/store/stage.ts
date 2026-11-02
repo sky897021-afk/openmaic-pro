@@ -42,6 +42,24 @@ export type StageSceneLoadToken = number;
 
 let latestStageSceneLoadToken = 0;
 
+export type StageContentRevision = number;
+
+let latestStageContentRevision = 0;
+
+/**
+ * A read that awaits I/O captures this before yielding and re-checks it before
+ * writing `stage` or `scenes`. Navigation tokens fence a different stage; this
+ * fence also protects an in-place content update on the SAME stage (for
+ * example, a PBL Hero scene becoming Workspace while an old read is pending).
+ */
+export function captureStageContentRevision(): StageContentRevision {
+  return latestStageContentRevision;
+}
+
+export function isStageContentRevisionCurrent(revision: StageContentRevision): boolean {
+  return revision === latestStageContentRevision;
+}
+
 type PendingEntry = { change: PendingChange; revision: number };
 
 let pendingStageId: string | null = null;
@@ -1002,6 +1020,7 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
         }
       }
 
+      const contentRevision = captureStageContentRevision();
       const { loadStageData } = await import('@/lib/utils/stage-storage');
       const data = await loadStageData(stageId);
 
@@ -1016,6 +1035,13 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
         const migrated = await hydratePBLScenesFromRuntime(stageId, data.scenes.map(migrateScene));
         if (!isCurrentStageSceneLoadToken(token)) {
           log.info('Newer stage load started during IndexedDB hydration, skipping load:', stageId);
+          return;
+        }
+        if (!isStageContentRevisionCurrent(contentRevision)) {
+          log.info(
+            'Stage content changed during IndexedDB hydration, skipping stale load:',
+            stageId,
+          );
           return;
         }
         const latestState = get();
@@ -1099,6 +1125,12 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
 }));
 
 export const useStageStore = createSelectors(useStageStoreBase);
+
+useStageStoreBase.subscribe((state, previousState) => {
+  if (state.stage !== previousState.stage || state.scenes !== previousState.scenes) {
+    latestStageContentRevision += 1;
+  }
+});
 
 // ==================== Debounced Save ====================
 

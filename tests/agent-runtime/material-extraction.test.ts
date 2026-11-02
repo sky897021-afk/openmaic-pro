@@ -18,7 +18,7 @@ import {
 } from '@/lib/server/material-extraction/extract';
 import { runNextMaterialExtraction } from '@/lib/server/material-extraction/runner';
 import { LocalMediaExtractionError } from '@/lib/document/extractors/local-media';
-import type { MediaExtractorProvider } from '@/lib/document';
+import type { MediaExtractorProvider, DocumentExtractorProvider } from '@/lib/document';
 
 function mediaProvider(
   extract: MediaExtractorProvider['extract'],
@@ -37,6 +37,28 @@ function mediaProvider(
       async: false,
     },
     availability: vi.fn(async () => ({ available })),
+    extract,
+  };
+}
+
+function documentProvider(
+  id: string,
+  extract: DocumentExtractorProvider['extract'],
+): DocumentExtractorProvider {
+  return {
+    id,
+    displayName: id,
+    version: '1',
+    supportedMimeTypes: ['application/pdf'],
+    capabilities: {
+      text: true,
+      images: true,
+      tables: true,
+      formulas: true,
+      layout: false,
+      ocr: false,
+      async: false,
+    },
     extract,
   };
 }
@@ -331,5 +353,90 @@ describe('uploaded material extraction lifecycle', () => {
       attempts: 0,
       error: expect.stringMatching(/Configure AliDocMind credentials.*install ffmpeg.*server ASR/i),
     });
+  });
+
+  it('passes over a document extractor that reads nothing, so a later candidate gets its turn', async () => {
+    db = new PGlite();
+    await db.waitReady;
+    await ensureAgentSessionSchema(db);
+    await ensureAgentSessionMaterialSchema(db);
+    const sessions = new PgAgentSessionStore(db, {
+      withTransaction: (body) => db!.transaction((tx: Queryable) => body(tx)),
+    });
+    const materials = new PgAgentSessionMaterialStore(db);
+    await sessions.createSession({ id: 'session-1', ownerId: 'owner-1', prompt: 'p' });
+    await materials.createMaterial('session-1', {
+      id: 'mat_scan',
+      kind: 'source',
+      title: 'scan.pdf',
+      rawAssetId: 'ast_raw',
+    });
+    await materials.enqueueExtraction('session-1', 'mat_scan');
+    const claim = await materials.claimNextExtraction('worker-1', { leaseTtlMs: 10_000 });
+
+    // A text-layer extractor answers an image-only scan successfully and with
+    // an empty artifact. Treating that as a result would store a blank material.
+    const calls: string[] = [];
+    const stored = new Map<string, Buffer>();
+    const extraction = await extractClaimedSessionMaterial(claim!, {
+      resolveSource: async () => ({ bytes: Buffer.from('scan bytes'), mime: 'application/pdf' }),
+      providers: () => [
+        documentProvider('text-layer', async () => {
+          calls.push('text-layer');
+          return { metadata: { pageCount: 1 }, blocks: [], assets: [] };
+        }),
+        documentProvider('image-reader', async () => {
+          calls.push('image-reader');
+          return {
+            metadata: { pageCount: 1 },
+            blocks: [{ id: 'block-1', type: 'text', text: 'Transcribed from the scan.' }],
+            assets: [],
+          };
+        }),
+      ],
+      configuredProviderIds: () => [],
+      putText: async (_sessionId, text) => {
+        stored.set('ast_extracted', text);
+        return 'ast_extracted';
+      },
+      complete: materials.completeExtraction.bind(materials),
+    });
+
+    expect(calls).toEqual(['text-layer', 'image-reader']);
+    expect(stored.get('ast_extracted')?.toString()).toBe('Transcribed from the scan.');
+    expect(extraction.extractorVersion).toBe('image-reader@1');
+  });
+
+  it('fails rather than storing a document when every extractor reads nothing', async () => {
+    db = new PGlite();
+    await db.waitReady;
+    await ensureAgentSessionSchema(db);
+    await ensureAgentSessionMaterialSchema(db);
+    const sessions = new PgAgentSessionStore(db, {
+      withTransaction: (body) => db!.transaction((tx: Queryable) => body(tx)),
+    });
+    const materials = new PgAgentSessionMaterialStore(db);
+    await sessions.createSession({ id: 'session-1', ownerId: 'owner-1', prompt: 'p' });
+    await materials.createMaterial('session-1', {
+      id: 'mat_blank',
+      kind: 'source',
+      rawAssetId: 'ast_raw',
+    });
+    await materials.enqueueExtraction('session-1', 'mat_blank');
+    const claim = await materials.claimNextExtraction('worker-1', { leaseTtlMs: 10_000 });
+
+    await expect(
+      extractClaimedSessionMaterial(claim!, {
+        resolveSource: async () => ({ bytes: Buffer.from('blank'), mime: 'application/pdf' }),
+        providers: () => [
+          documentProvider('text-layer', async () => ({
+            metadata: { pageCount: 1 },
+            blocks: [{ id: 'block-1', type: 'text', text: '   ' }],
+            assets: [],
+          })),
+        ],
+        configuredProviderIds: () => [],
+      }),
+    ).rejects.toThrow(/text-layer: produced no text/);
   });
 });

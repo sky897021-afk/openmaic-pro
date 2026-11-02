@@ -15,6 +15,7 @@ import type {
   PBLSubmission,
   PBLUiPhase,
 } from '@/lib/pbl/v2/types';
+import { isEqual } from 'lodash';
 import { omitUndefinedObjectMembers } from '@/lib/persistence/plain-json';
 import { clone } from './clone';
 
@@ -175,6 +176,22 @@ export function stripToDesignTemplate(project: PBLProjectV2): PBLProjectV2 {
   }));
 
   return template;
+}
+
+/**
+ * Compare the parts of two projects that belong in the document, ignoring
+ * learner/runtime state and the timestamp runtime normalization stamps.
+ *
+ * The PBL renderer normalizes projects before display. Some repairs are
+ * design-level fixes (for example a missing agent thread or scenario stage) and
+ * must be saved, while opening the first task or recording repair events is
+ * runtime-only and must not dirty the document.
+ */
+export function hasPBLDesignTemplateChanges(previous: PBLProjectV2, next: PBLProjectV2): boolean {
+  const previousTemplate = stripToDesignTemplate(previous);
+  const nextTemplate = stripToDesignTemplate(next);
+  previousTemplate.updatedAt = nextTemplate.updatedAt;
+  return !isEqual(previousTemplate, nextTemplate);
 }
 
 export function applyLearnerState(

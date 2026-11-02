@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextRequest } from 'next/server';
+import JSZip from 'jszip';
+import * as XLSX from 'xlsx';
 
 const mocks = vi.hoisted(() => ({
   isServerConfiguredProvider: vi.fn(() => false),
@@ -79,7 +81,7 @@ describe('POST /api/extract-document', () => {
 
   it('returns 400 for unsupported course material MIME types', async () => {
     const res = await postExtractDocument({
-      file: new File(['x,y'], 'sheet.csv', { type: 'text/csv' }),
+      file: new File(['x'], 'probe.bin', { type: 'application/x-unsupported' }),
     });
     const json = await res.json();
 
@@ -161,11 +163,113 @@ describe('POST /api/extract-document', () => {
     });
   });
 
+  it('extracts DOCX locally, without any provider credentials', async () => {
+    const res = await postExtractDocument({
+      file: await makeDocx(['第一章 概述', '裂解炉是核心设备']),
+    });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json).toMatchObject({
+      success: true,
+      data: {
+        text: '第一章 概述\n裂解炉是核心设备',
+        metadata: {
+          mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          parser: 'local-document',
+        },
+      },
+    });
+  });
+
+  it('extracts PPTX locally, without any provider credentials', async () => {
+    const res = await postExtractDocument({
+      file: await makePptx(['幻灯片标题', '正文']),
+    });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json).toMatchObject({
+      success: true,
+      data: {
+        text: '## Slide 1\n\n幻灯片标题\n正文',
+        metadata: {
+          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+          parser: 'local-document',
+        },
+      },
+    });
+  });
+
+  it('extracts XLSX locally, without any provider credentials', async () => {
+    const res = await postExtractDocument({
+      file: makeXlsx([
+        ['姓名', '分数'],
+        ['张三', 95],
+      ]),
+    });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json).toMatchObject({
+      success: true,
+      data: {
+        text: '## Sheet: S\n\n| 姓名 | 分数 |\n| --- | --- |\n| 张三 | 95 |',
+        metadata: {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          parser: 'local-document',
+        },
+      },
+    });
+  });
+
+  it('extracts legacy XLS locally, without any provider credentials', async () => {
+    const res = await postExtractDocument({
+      file: makeXlsx(
+        [
+          ['位号', '说明'],
+          ['E-101', '裂解炉'],
+        ],
+        'biff8',
+      ),
+    });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json).toMatchObject({
+      success: true,
+      data: {
+        text: '## Sheet: S\n\n| 位号 | 说明 |\n| --- | --- |\n| E-101 | 裂解炉 |',
+        metadata: { mimeType: 'application/vnd.ms-excel', parser: 'local-document' },
+      },
+    });
+  });
+
+  it('extracts CSV locally, without any provider credentials', async () => {
+    const res = await postExtractDocument({
+      file: new File(['a,b\n1,2\n'], 'table.csv', { type: 'text/csv' }),
+    });
+    const json = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(json).toMatchObject({
+      success: true,
+      data: {
+        text: '| a | b |\n| --- | --- |\n| 1 | 2 |',
+        metadata: { mimeType: 'text/csv', parser: 'local-document' },
+      },
+    });
+  });
+
   it('returns actionable 422 diagnostics when DOCX requires unconfigured MinerU', async () => {
     const res = await postExtractDocument({
       file: new File(['not really docx'], 'lesson.docx', {
         type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       }),
+      // Explicitly self-hosted MinerU: DOCX no longer auto-selects it (a local
+      // extractor now handles the format), and this test is about MinerU's
+      // unconfigured-deployment diagnostics.
+      providerId: 'mineru',
     });
     const json = await res.json();
 
@@ -213,6 +317,7 @@ describe('POST /api/extract-document', () => {
       file: new File(['not really docx'], 'lesson.docx', {
         type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       }),
+      providerId: 'mineru',
       apiKey: 'cloud-key',
     });
     const json = await res.json();
@@ -237,6 +342,7 @@ describe('POST /api/extract-document', () => {
       file: new File(['not really docx'], 'lesson.docx', {
         type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       }),
+      providerId: 'mineru',
       apiKey: 'cloud-key',
     });
     const json = await res.json();
@@ -263,6 +369,65 @@ describe('POST /api/extract-document', () => {
     );
   });
 });
+
+/** A minimal but structurally valid OOXML package, enough for a local read. */
+async function makeDocx(paragraphs: readonly string[]): Promise<File> {
+  const zip = new JSZip();
+  zip.file(
+    '[Content_Types].xml',
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+  );
+  zip.file(
+    'word/document.xml',
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' +
+      paragraphs.map((text) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`).join('') +
+      '</w:body></w:document>',
+  );
+  // An ArrayBuffer is a valid BlobPart; a Uint8Array<ArrayBufferLike> is not
+  // assignable to Node's BlobPart under the current lib types.
+  const bytes = await zip.generateAsync({ type: 'arraybuffer' });
+  return new File([bytes], 'lesson.docx', {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  });
+}
+
+async function makePptx(paragraphs: readonly string[]): Promise<File> {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types/>');
+  zip.file(
+    'ppt/slides/slide1.xml',
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+      'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:sp><p:txBody>' +
+      paragraphs.map((text) => `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>`).join('') +
+      '</p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+  );
+  const bytes = await zip.generateAsync({ type: 'arraybuffer' });
+  return new File([bytes], 'deck.pptx', {
+    type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  });
+}
+
+function makeXlsx(rows: unknown[][], bookType: 'xlsx' | 'biff8' = 'xlsx'): File {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), 'S');
+  // SheetJS writes `type: 'arraybuffer'` only in newer builds; `buffer` works
+  // in 0.18.x. The slice gives a plain ArrayBuffer, which is a valid BlobPart.
+  const buffer = XLSX.write(workbook, { type: 'buffer', bookType }) as Buffer;
+  const bytes = buffer.buffer.slice(
+    buffer.byteOffset,
+    buffer.byteOffset + buffer.byteLength,
+  ) as ArrayBuffer;
+  return new File([bytes], bookType === 'biff8' ? 'sheet.xls' : 'sheet.xlsx', {
+    type:
+      bookType === 'biff8'
+        ? 'application/vnd.ms-excel'
+        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+}
 
 async function postExtractDocumentByAssetId(input: Record<string, unknown>) {
   const { POST } = await import('@/app/api/extract-document/route');

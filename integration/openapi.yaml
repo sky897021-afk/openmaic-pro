@@ -1,0 +1,1190 @@
+openapi: 3.0.3
+info:
+  title: OpenMAIC 平台集成 API（模块一：完整课程）
+  version: '1.0'
+  description: |
+    供公司一体化平台**后端**调用的接口，用于生成完整课程（classic）。
+
+    流程：OpenMAIC 生成大纲 → 平台展示、老师编辑 → 平台回传确认稿 → OpenMAIC 生成课程并返回链接。
+
+    ## 鉴权
+
+    每个请求都要带三个签名头，签名覆盖**原始请求体字节**：
+
+    ```
+    stringToSign = `${timestamp}.${nonce}.${rawBody}`
+    signature    = hex(HMAC-SHA256(sharedSecret, stringToSign))
+    ```
+
+    - `timestamp` 为 Unix **秒**，允许 ±5 分钟；
+    - `nonce` 每次唯一，同一 nonce 不能重复使用；
+    - GET 请求没有 body，用空字符串 `""` 参与签名；
+    - 请求体只能序列化一次：签名和发送必须是同一个字符串；
+    - 文件抽取接口 `/extract` 额外接受 `Authorization: Bearer <shared secret>`（multipart 原始字节签名对部分 HTTP 客户端较麻烦）。
+
+    ## 安全
+
+    - 共享密钥只放在平台后端，浏览器不得持有；
+    - 未配置 `INTEGRATION_SHARED_SECRET` 时，所有接口返回 404。
+servers:
+  - url: http://192.168.10.221:3003
+    description: 开发/联调地址（正式部署后替换）
+tags:
+  - name: integration
+    description: 平台服务端调用
+paths:
+  /api/integration/v1/extract:
+    post:
+      tags: [integration]
+      summary: 抽取原始文件的文本
+      description: |
+        平台可以直接上传原始文件，由 OpenMAIC 逐个尝试可用的提取器并返回文本；
+        平台拿到 `text` 后放进 `/outlines` 和 `/courses` 的 `materials`。
+
+        **鉴权二选一**：
+        - HMAC 三个头（签名覆盖 multipart 的原始字节）；
+        - `Authorization: Bearer <shared secret>`。
+
+        单个文件失败不会让整批失败：每个文件单独带 `error`。
+        限制：单文件 ≤ 50 MB，单次 ≤ 10 个文件，总计 ≤ 150 MB。
+      parameters:
+        - name: authorization
+          in: header
+          required: false
+          description: '`Bearer <INTEGRATION_SHARED_SECRET>`；与 HMAC 头二选一'
+          schema:
+            type: string
+        - name: x-openmaic-timestamp
+          in: header
+          required: false
+          description: 使用 HMAC 时的 Unix 秒
+          schema:
+            type: string
+            pattern: '^\d+$'
+        - name: x-openmaic-nonce
+          in: header
+          required: false
+          description: 使用 HMAC 时的唯一 nonce
+          schema:
+            type: string
+        - name: x-openmaic-signature
+          in: header
+          required: false
+          description: 使用 HMAC 时的 hex 签名（覆盖原始 multipart 字节）
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '200':
+          description: 逐文件抽取结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExtractResponse'
+              examples:
+                mixed:
+                  value:
+                    success: true
+                    materials:
+                      - fileName: 操作手册.docx
+                        mimeType: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+                        kind: docx
+                        text: 第一章……
+                        parser: local-document
+                      - fileName: 装置图.png
+                        mimeType: image/png
+                        kind: png
+                        text: 乙烯裂解 E-101
+                        parser: vision-ocr
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: 集成接口未启用（未配置 INTEGRATION_SHARED_SECRET）
+        '413':
+          description: 总上传大小超过 150 MB
+  /api/integration/v1/outlines:
+    post:
+      tags: [integration]
+      summary: 生成完整课程大纲
+      description: |
+        同步调用，通常 30–60 秒，平台后端超时建议 120 秒。
+
+        返回的 `outlines` 由平台展示给老师编辑；**平台不认识的字段必须原样回传**到 `/courses`。
+        平台可直接上传原始文件，由 OpenMAIC 提取文本、图片和版式，并返回后续 `/courses` 可复用的
+        opaque `materialIds`。multipart 单文件 ≤ 50 MB，单次 ≤ 10 个，总计 ≤ 150 MB。
+
+        **鉴权**：JSON 请求使用 HMAC 三个头；multipart 请求可使用 HMAC 三个头或
+        `Authorization: Bearer <shared secret>`。
+      parameters:
+        - name: authorization
+          in: header
+          required: false
+          description: '`Bearer <INTEGRATION_SHARED_SECRET>`；multipart 时可替代 HMAC 头'
+          schema:
+            type: string
+        - name: x-openmaic-timestamp
+          in: header
+          required: false
+          description: 使用 HMAC 时的 Unix 秒
+          schema:
+            type: string
+            pattern: '^\d+$'
+        - name: x-openmaic-nonce
+          in: header
+          required: false
+          description: 使用 HMAC 时的唯一 nonce
+          schema:
+            type: string
+        - name: x-openmaic-signature
+          in: header
+          required: false
+          description: 使用 HMAC 时的 hex 签名（覆盖原始请求体字节）
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OutlineRequest'
+            examples:
+              water:
+                summary: 水的三态变化
+                value:
+                  tenantId: dfsm
+                  externalCourseId: course-123
+                  externalChapterId: chapter-9
+                  requirement: 请生成一节很短的完整课程：主题是「水的三态变化」，2 页即可，面向初中生。
+                  materials:
+                    - id: res-1
+                      title: 水的三态变化
+                      kind: docx
+                      text: 水在自然界中有固态、液态、气态三种形态……
+                    - id: res-2
+                      title: 装置介绍视频
+                      kind: video
+                      text: ''
+                  options:
+                    enableImageGeneration: false
+          multipart/form-data:
+            schema:
+              type: object
+              required: [tenantId, requirement, files]
+              properties:
+                tenantId:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                requirement:
+                  type: string
+                  minLength: 1
+                  maxLength: 20000
+                externalCourseId:
+                  type: string
+                  maxLength: 200
+                externalChapterId:
+                  type: string
+                  maxLength: 200
+                options:
+                  type: string
+                  description: JSON 字符串，可包含 enableWebSearch / enableImageGeneration / enableVideoGeneration
+                enableWebSearch:
+                  type: string
+                  enum: ['true', 'false']
+                enableImageGeneration:
+                  type: string
+                  enum: ['true', 'false']
+                enableVideoGeneration:
+                  type: string
+                  enum: ['true', 'false']
+                files:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '200':
+          description: 大纲生成成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutlineResponse'
+              examples:
+                water:
+                  summary: 生成结果
+                  value:
+                    success: true
+                    outlineId: ol_6_3mDj6W3iZ6
+                    courseTitle: 水的三态变化
+                    languageDirective: 整节课使用中文（简体）授课……
+                    outlines:
+                      - id: scene_1
+                        order: 1
+                        type: slide
+                        title: 水的三态与循环变化
+                        description: 介绍水的三种形态及其循环变化
+                        keyPoints: [固态, 液态, 气态]
+                      - id: scene_2
+                        order: 2
+                        type: quiz
+                        title: 随堂检测：变化与吸放热
+                        description: 检查学生对熔化、汽化、液化、凝固的理解
+                        keyPoints: [吸热, 放热]
+                        quizConfig:
+                          questionCount: 3
+                          difficulty: easy
+                          questionTypes: [single]
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: 集成接口未启用（未配置 INTEGRATION_SHARED_SECRET）
+        '413':
+          description: 总上传大小超过 150 MB
+        '502':
+          $ref: '#/components/responses/GenerationFailed'
+  /api/integration/v1/courses:
+    post:
+      tags: [integration]
+      summary: 用老师确认的大纲生成课程
+      description: |
+        异步任务。立即返回 `jobId`，之后用 `/courses/jobs/{jobId}` 轮询。
+
+        `Idempotency-Key` 必填：同一个 key 重复提交会返回同一个 job（`reused: true`），不会重复生成。
+        失败后重试请换一个新的 key。
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CourseRequest'
+      responses:
+        '202':
+          description: 任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CourseQueuedResponse'
+              examples:
+                queued:
+                  value:
+                    success: true
+                    jobId: int_9f75a05814294d5db34b0d75
+                    status: queued
+                    pollUrl: http://192.168.10.221:3003/api/integration/v1/courses/jobs/int_9f75a05814294d5db34b0d75
+                    reused: false
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: 集成接口未启用（未配置 INTEGRATION_SHARED_SECRET）
+  /api/integration/v1/courses/jobs/{jobId}:
+    get:
+      tags: [integration]
+      summary: 轮询生成进度
+      description: |
+        建议 5–10 秒一次，直到 `done: true`。GET 无请求体，签名按空字符串 `""` 计算。
+
+        超过 15–30 分钟仍为 `running` 时，按失败处理并换新 `Idempotency-Key` 重试。
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: jobId
+          in: path
+          required: true
+          description: '`/courses` 返回的 jobId'
+          schema:
+            type: string
+            pattern: '^int_[0-9a-f]{24}$'
+      responses:
+        '200':
+          description: 任务状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusResponse'
+              examples:
+                running:
+                  value:
+                    success: true
+                    jobId: int_9f75a05814294d5db34b0d75
+                    status: running
+                    step: generating_scenes
+                    progress: 31
+                    scenesGenerated: 0
+                    totalScenes: 2
+                    done: false
+                    message: 'Generating scene 1/2: 水的三态'
+                succeeded:
+                  value:
+                    success: true
+                    jobId: int_9f75a05814294d5db34b0d75
+                    status: succeeded
+                    step: completed
+                    progress: 100
+                    scenesGenerated: 2
+                    totalScenes: 2
+                    done: true
+                    result:
+                      stageId: 1iOGPLEUQW
+                      classroomUrl: http://192.168.10.221:3003/classroom/1iOGPLEUQW
+                      scenesCount: 2
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: job 不存在，或集成接口未启用
+  /api/integration/v1/materials:
+    post:
+      tags: [integration]
+      summary: 上传模块二素材（原始文件）
+      description: |
+        multipart；单文件 ≤ 50 MB，单次 ≤ 10 个，总计 ≤ 150 MB。
+        鉴权：HMAC 三个头（覆盖原始 multipart 字节）或 `Authorization: Bearer <secret>`。
+
+        原始文件保存 24 小时。PDF 返回文本、内嵌图片（页码/尺寸）和前 3 页版式参考图；
+        DOCX 返回文本、`word/media` 图片和阅读顺序/尺寸。
+      parameters:
+        - name: authorization
+          in: header
+          required: false
+          description: '`Bearer <INTEGRATION_SHARED_SECRET>`；与 HMAC 头二选一'
+          schema:
+            type: string
+        - name: x-openmaic-timestamp
+          in: header
+          required: false
+          schema:
+            type: string
+            pattern: '^\d+$'
+        - name: x-openmaic-nonce
+          in: header
+          required: false
+          schema:
+            type: string
+        - name: x-openmaic-signature
+          in: header
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [tenantId, files]
+              properties:
+                tenantId:
+                  type: string
+                  minLength: 1
+                  maxLength: 100
+                files:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '200':
+          description: 逐文件素材摘要
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaterialsUploadResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: 集成接口未启用
+        '413':
+          description: 总上传大小超过 150 MB
+  /api/integration/v1/handoffs:
+    post:
+      tags: [integration]
+      summary: 创建模块二交接
+      description: |
+        平台上传素材后创建 handoff，返回浏览器跳转地址 `/game?handoff=<id>`。
+        handoff 2 小时过期。`materialIds` 必须唯一、未过期，并且全部属于请求中的 `tenantId`；
+        任一素材缺失或跨租户时不会创建 handoff。
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HandoffRequest'
+      responses:
+        '200':
+          description: 交接已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffCreatedResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: 集成接口未启用
+  /api/integration/v1/handoffs/{id}:
+    get:
+      tags: [integration]
+      summary: 查询交接状态
+      description: '平台轮询直到 `status: succeeded`，然后取 `resourceUrl`。'
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/Nonce'
+        - $ref: '#/components/parameters/Signature'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^ho_[A-Za-z0-9_-]{8,64}$'
+      responses:
+        '200':
+          description: 交接状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffStatusResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: handoff 不存在或已过期
+  /api/integration/v1/handoffs/{id}/payload:
+    get:
+      tags: [integration]
+      summary: 浏览器读取交接素材
+      description: |
+        供 `/game?handoff=<id>` 落地页使用。不可猜的 handoff id 即读取能力；
+        不需要 HMAC。响应带 `cache-control: no-store`，并包含回写结果所需的 `completionToken`。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^ho_[A-Za-z0-9_-]{8,64}$'
+      responses:
+        '200':
+          description: 提示词与素材
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffPayloadResponse'
+        '404':
+          description: handoff 不存在或已过期
+        '410':
+          description: 一个或多个素材已过期
+  /api/integration/v1/handoffs/{id}/result:
+    post:
+      tags: [integration]
+      summary: 回写生成结果
+      description: |
+        由生成页在课程落库后自动调用；`completionToken` 必须与 handoff 匹配。
+        平台不需要调用这个接口，只轮询 `/handoffs/{id}` 即可。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^ho_[A-Za-z0-9_-]{8,64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HandoffResultRequest'
+      responses:
+        '200':
+          description: 已记录结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffResultResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '403':
+          description: completionToken 无效，或 handoff 已过期
+        '404':
+          description: 集成接口未启用
+components:
+  parameters:
+    Timestamp:
+      name: x-openmaic-timestamp
+      in: header
+      required: true
+      description: Unix 秒（不是毫秒），允许 ±5 分钟
+      schema:
+        type: string
+        pattern: '^\d+$'
+    Nonce:
+      name: x-openmaic-nonce
+      in: header
+      required: true
+      description: 每次请求唯一，用于防重放
+      schema:
+        type: string
+        maxLength: 200
+    Signature:
+      name: x-openmaic-signature
+      in: header
+      required: true
+      description: hex(HMAC-SHA256(secret, `${timestamp}.${nonce}.${rawBody}`))
+      schema:
+        type: string
+        pattern: '^[0-9a-fA-F]{64}$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: 业务幂等键，1–200 字符；同一个 key 只生成一次
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 200
+  responses:
+    InvalidRequest:
+      description: 请求不合法（错误信息会指出具体字段）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missingRequirement:
+              value:
+                success: false
+                errorCode: INVALID_REQUEST
+                error: requirement is required
+            badOutlineType:
+              value:
+                success: false
+                errorCode: INVALID_REQUEST
+                error: outlines[0].type must be one of slide, quiz, interactive (a classic course does not contain PBL pages)
+    Unauthenticated:
+      description: 签名缺失、错误、过期，或 nonce 已使用
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            missing:
+              value:
+                success: false
+                errorCode: UNAUTHENTICATED
+                error: missing integration signature headers
+            badSignature:
+              value:
+                success: false
+                errorCode: UNAUTHENTICATED
+                error: invalid integration signature
+    GenerationFailed:
+      description: 大纲生成失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            modelFailed:
+              value:
+                success: false
+                errorCode: GENERATION_FAILED
+                error: Outline generation failed
+                details: model unavailable
+  schemas:
+    OutlineRequest:
+      type: object
+      required: [tenantId, requirement]
+      properties:
+        tenantId:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 平台租户标识，例如 dfsm
+        externalCourseId:
+          type: string
+          maxLength: 200
+          description: 平台课程 id
+        externalChapterId:
+          type: string
+          maxLength: 200
+          description: 平台章节 id
+        requirement:
+          type: string
+          minLength: 1
+          maxLength: 20000
+          description: 老师填写的教学要求
+        materialIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          description: 由 `/materials` 或 `/outlines` 返回的 opaque 素材 id；必须全部属于 tenantId
+          items:
+            type: string
+            pattern: '^mat_[A-Za-z0-9_-]{8,64}$'
+        materials:
+          type: array
+          maxItems: 50
+          description: 平台勾选的章节资源；全部 text 合计不超过 200000 字符
+          items:
+            $ref: '#/components/schemas/IntegrationMaterial'
+        options:
+          $ref: '#/components/schemas/IntegrationOptions'
+    CourseRequest:
+      type: object
+      required: [tenantId, requirement, outlines]
+      properties:
+        tenantId:
+          type: string
+          minLength: 1
+          maxLength: 100
+        externalCourseId:
+          type: string
+          maxLength: 200
+        externalChapterId:
+          type: string
+          maxLength: 200
+        requirement:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        materialIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          description: 生成大纲时使用的 opaque 素材 id；必须全部属于 tenantId
+          items:
+            type: string
+            pattern: '^mat_[A-Za-z0-9_-]{8,64}$'
+        courseTitle:
+          type: string
+          maxLength: 200
+          description: 上一步返回的 courseTitle，老师可改
+        languageDirective:
+          type: string
+          maxLength: 200
+          description: 上一步返回的 languageDirective，老师可改
+        outlines:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: 老师确认后的完整大纲
+          items:
+            $ref: '#/components/schemas/SceneOutline'
+        materials:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/IntegrationMaterial'
+        options:
+          $ref: '#/components/schemas/IntegrationOptions'
+    IntegrationMaterial:
+      type: object
+      required: [text]
+      properties:
+        id:
+          type: string
+          description: 平台资源 id
+        title:
+          type: string
+        kind:
+          type: string
+          description: docx / pdf / video / …（仅描述用途）
+        text:
+          type: string
+          description: 平台抽取的文本；视频在模块一可只传标题，text 为空
+    IntegrationOptions:
+      type: object
+      properties:
+        enableWebSearch:
+          type: boolean
+          description: 大纲生成时是否联网检索
+        enableImageGeneration:
+          type: boolean
+          description: 是否为页面生成配图
+        enableVideoGeneration:
+          type: boolean
+          description: 是否为页面生成视频
+    SceneOutline:
+      type: object
+      required: [type, title, description]
+      description: |
+        老师确认后回传。除下列字段外，**其余字段（quizConfig、widgetType、suggestedImageIds 等）必须原样回传**，
+        否则会丢失生成所需的配置。
+      properties:
+        id:
+          type: string
+          description: 缺省或重复时由 OpenMAIC 重新生成
+        order:
+          type: integer
+          description: 顺序；服务端会按此排序并重新编号为 1..n
+        type:
+          type: string
+          enum: [slide, quiz, interactive]
+          description: 完整课程只支持这三种；PBL 属于模块三
+        title:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        keyPoints:
+          type: array
+          items:
+            type: string
+        teachingObjective:
+          type: string
+        estimatedDuration:
+          type: integer
+        quizConfig:
+          type: object
+          additionalProperties: true
+        widgetType:
+          type: string
+        widgetOutline:
+          type: object
+          additionalProperties: true
+        suggestedImageIds:
+          type: array
+          items:
+            type: string
+      additionalProperties: true
+    OutlineResponse:
+      type: object
+      required: [success, outlineId, courseTitle, languageDirective, outlines]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        outlineId:
+          type: string
+        courseTitle:
+          type: string
+        languageDirective:
+          type: string
+        outlines:
+          type: array
+          items:
+            $ref: '#/components/schemas/SceneOutline'
+        materialIds:
+          type: array
+          description: 本次大纲使用的已存储素材 id，可原样传给 `/courses`
+          items:
+            type: string
+            pattern: '^mat_[A-Za-z0-9_-]{8,64}$'
+        materials:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaterialSummary'
+        warnings:
+          type: array
+          items:
+            type: string
+    CourseQueuedResponse:
+      type: object
+      required: [success, jobId, status, pollUrl, reused]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        jobId:
+          type: string
+          pattern: '^int_[0-9a-f]{24}$'
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
+        pollUrl:
+          type: string
+          format: uri
+        reused:
+          type: boolean
+          description: true 表示命中了同一个 Idempotency-Key 的原任务
+    JobStatusResponse:
+      type: object
+      required: [success, jobId, status, done]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        jobId:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
+        step:
+          type: string
+          description: initializing / researching / generating_outlines / generating_scenes / generating_media / generating_tts / persisting / completed / failed
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+        scenesGenerated:
+          type: integer
+        totalScenes:
+          type: integer
+        done:
+          type: boolean
+        result:
+          type: object
+          description: 仅 succeeded 时出现
+          properties:
+            stageId:
+              type: string
+            classroomUrl:
+              type: string
+              format: uri
+            scenesCount:
+              type: integer
+            warning:
+              type: string
+        error:
+          type: string
+          description: 仅 failed 时出现
+    ExtractedMaterial:
+      type: object
+      required: [fileName, mimeType, kind, text]
+      properties:
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        kind:
+          type: string
+          description: docx / pdf / png / video / …
+        text:
+          type: string
+          description: 成功时是抽取结果；失败时为空字符串
+        parser:
+          type: string
+          description: 实际产出文本的提取器 id；失败时为空
+        diagnostics:
+          type: array
+          items:
+            type: string
+        error:
+          type: string
+          description: 仅该文件失败时出现
+    ExtractResponse:
+      type: object
+      required: [success, materials]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        materials:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExtractedMaterial'
+    MaterialImage:
+      type: object
+      required: [id, src, mimeType, order, kind]
+      properties:
+        id:
+          type: string
+        src:
+          type: string
+          description: data URL
+        mimeType:
+          type: string
+        order:
+          type: integer
+        pageNumber:
+          type: integer
+        width:
+          type: integer
+        height:
+          type: integer
+        kind:
+          type: string
+          enum: [embedded, page]
+        description:
+          type: string
+    MaterialLayout:
+      type: object
+      properties:
+        pageCount:
+          type: integer
+        pages:
+          type: array
+          items:
+            type: object
+            required: [index, src]
+            properties:
+              index:
+                type: integer
+              src:
+                type: string
+              width:
+                type: integer
+              height:
+                type: integer
+        blocks:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [image, paragraph]
+              order:
+                type: integer
+              imageId:
+                type: string
+              width:
+                type: integer
+              height:
+                type: integer
+        summary:
+          type: string
+    MaterialRecord:
+      type: object
+      required: [id, fileName, text, images, layout]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        fileName:
+          type: string
+        mimeType:
+          type: string
+        kind:
+          type: string
+        size:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        parser:
+          type: string
+        text:
+          type: string
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaterialImage'
+        layout:
+          $ref: '#/components/schemas/MaterialLayout'
+    MaterialSummary:
+      type: object
+      required: [fileName]
+      properties:
+        materialId:
+          type: string
+        fileName:
+          type: string
+        kind:
+          type: string
+        size:
+          type: integer
+        chars:
+          type: integer
+        imageCount:
+          type: integer
+        pageCount:
+          type: integer
+        layoutPageCount:
+          type: integer
+        parser:
+          type: string
+        error:
+          type: string
+    MaterialsUploadResponse:
+      type: object
+      required: [success, materials]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        materials:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaterialSummary'
+    HandoffRequest:
+      type: object
+      required: [tenantId, prompt, materialIds]
+      properties:
+        tenantId:
+          type: string
+          minLength: 1
+          maxLength: 100
+        teacherId:
+          type: string
+          maxLength: 200
+        externalCourseId:
+          type: string
+          maxLength: 200
+        externalChapterId:
+          type: string
+          maxLength: 200
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 20000
+        materialIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          description: 必须全部属于 tenantId，且不得包含其他租户或已过期素材
+          items:
+            type: string
+            pattern: '^mat_[A-Za-z0-9_-]{8,64}$'
+        mode:
+          type: string
+          enum: [single-game]
+        returnUrl:
+          type: string
+          format: uri
+    HandoffCreatedResponse:
+      type: object
+      required: [success, handoffId, redirectUrl, status, expiresAt]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        handoffId:
+          type: string
+        redirectUrl:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [pending]
+        expiresAt:
+          type: string
+          format: date-time
+    HandoffStatusResponse:
+      type: object
+      required: [success, handoffId, status]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        handoffId:
+          type: string
+        status:
+          type: string
+          enum: [pending, succeeded]
+        stageId:
+          type: string
+        resourceUrl:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    HandoffPayloadResponse:
+      type: object
+      required: [success, handoff, materials]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        handoff:
+          type: object
+          required: [id, prompt, mode, completionToken]
+          properties:
+            id:
+              type: string
+            prompt:
+              type: string
+            mode:
+              type: string
+              enum: [single-game]
+            returnUrl:
+              type: string
+              format: uri
+            completionToken:
+              type: string
+            expiresAt:
+              type: string
+              format: date-time
+        materials:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaterialRecord'
+    HandoffResultRequest:
+      type: object
+      required: [completionToken, stageId]
+      properties:
+        completionToken:
+          type: string
+        stageId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{6,80}$'
+    HandoffResultResponse:
+      type: object
+      required: [success, handoffId, status, stageId]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        handoffId:
+          type: string
+        status:
+          type: string
+          enum: [succeeded]
+        stageId:
+          type: string
+        resourceUrl:
+          type: string
+    ErrorResponse:
+      type: object
+      required: [success, errorCode, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        errorCode:
+          type: string
+          description: INVALID_REQUEST / UNAUTHENTICATED / GENERATION_FAILED / …
+        error:
+          type: string
+        details:
+          type: string
+        reason:
+          type: string

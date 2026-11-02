@@ -330,6 +330,55 @@ describe('classroom server fallback PBL hydration', () => {
     expect(applyStageAndScenes).not.toHaveBeenCalled();
   });
 
+  it('does not overwrite a same-id Workspace scene that lands during hydration', async () => {
+    const stage = makeStage();
+    const heroScene = makePBLScene(makeProject({ uiPhase: 'hero' }));
+    const workspaceScene = makePBLScene(
+      makeProject({ uiPhase: 'workspace', title: 'Workspace project' }),
+    );
+    const token = claimStageSceneLoadToken();
+    let resolveHydration!: (scenes: Scene[]) => void;
+    const hydrateScenes = vi.fn(
+      () =>
+        new Promise<Scene[]>((resolve) => {
+          resolveHydration = resolve;
+        }),
+    );
+    const applyStageAndScenes = vi.fn();
+
+    useStageStore.setState({
+      stage,
+      scenes: [heroScene],
+      currentSceneId: SCENE_ID,
+      mode: 'playback',
+    });
+
+    const applying = applyHydratedClassroomFallbackScenes({
+      loadToken: token,
+      stage,
+      scenes: [heroScene],
+      hydrateScenes,
+      applyStageAndScenes,
+    });
+    await vi.waitFor(() => expect(hydrateScenes).toHaveBeenCalled());
+
+    useStageStore.setState({
+      scenes: [workspaceScene],
+      currentSceneId: SCENE_ID,
+    });
+    resolveHydration([heroScene]);
+
+    await expect(applying).resolves.toBe(false);
+    expect(applyStageAndScenes).not.toHaveBeenCalled();
+    expect(useStageStore.getState().stage?.id).toBe(STAGE_ID);
+    expect(useStageStore.getState().scenes).toEqual([workspaceScene]);
+    expect(
+      useStageStore.getState().scenes[0]?.content.type === 'pbl'
+        ? useStageStore.getState().scenes[0].content.projectV2?.uiPhase
+        : undefined,
+    ).toBe('workspace');
+  });
+
   it('hydrates server-fallback scenes from existing runtime records', async () => {
     const store = new MemoryRuntimeStore();
     const kv = new MemoryKVStore();

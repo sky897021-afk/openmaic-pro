@@ -251,6 +251,11 @@ const TEMPORARY_VENDOR_DEBT: readonly AllowedVendorDebt[] = [
       ['mineru', 15],
       ['ffmpeg', 2],
       ['local', 2],
+      // The `vision-ocr` provider id makes "ocr" a derived vendor term, which
+      // catches this route's two pre-existing `kf.ocrText` reads on the
+      // media-keyframe path. Unrelated to the PDF provider; the field belongs
+      // to the media artifact contract.
+      ['ocr', 2],
     ],
   ),
   ...groupedDebt(

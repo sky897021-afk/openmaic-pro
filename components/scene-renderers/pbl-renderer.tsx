@@ -9,6 +9,7 @@ import type { PBLProjectV2 } from '@/lib/pbl/v2/types';
 import { resolvePBLContent, upgradeLegacyPBLConfigToProjectV2 } from '@/lib/pbl/legacy/read';
 import { normalizeProjectRuntime } from '@/lib/pbl/v2/operations/kernel/progress';
 import { transitionProjectUiPhase } from '@/lib/pbl/v2/operations/kernel/runtime-events';
+import { hasPBLDesignTemplateChanges } from '@/lib/pbl/v2/runtime/learner-state';
 import { useStageStore } from '@/lib/store/stage';
 import { cn } from '@/lib/utils/cn';
 import { PBLV2Hero } from './pbl/v2/hero';
@@ -135,17 +136,18 @@ function PBLV2Container({
     setActiveStreamCount((count) => Math.max(0, active ? count + 1 : count - 1));
   }, []);
 
-  const { runtimeProject, changed } = useMemo(() => {
+  const { runtimeProject, requiresDocumentSave } = useMemo(() => {
     const next = structuredClone(projectV2);
+    const runtimeChanged = normalizeProjectRuntime(next);
     return {
       runtimeProject: next,
-      changed: normalizeProjectRuntime(next),
+      requiresDocumentSave: runtimeChanged && hasPBLDesignTemplateChanges(projectV2, next),
     };
   }, [projectV2]);
 
   useEffect(() => {
-    if (changed) onProjectV2Change(runtimeProject);
-  }, [changed, runtimeProject, onProjectV2Change]);
+    if (requiresDocumentSave) onProjectV2Change(runtimeProject);
+  }, [requiresDocumentSave, runtimeProject, onProjectV2Change]);
 
   // Keep the portal host in sync with native fullscreen so the workspace
   // renders inside the fullscreened stage instead of an orphaned <body>.

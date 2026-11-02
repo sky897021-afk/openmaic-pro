@@ -31,7 +31,7 @@ import type {
 } from './outline-types.js';
 import { DEFAULT_LANGUAGE_DIRECTIVE } from './outline-generator.js';
 import { postProcessInteractiveHtml } from './interactive-post-processor.js';
-import { findInteractiveScriptSyntaxFailure } from './interactive-script-validator.js';
+import { findInteractiveScriptFailure } from './interactive-script-validator.js';
 import { parseActionsFromStructuredOutput } from './action-parser.js';
 import { parseJsonResponse } from './json-repair.js';
 import {
@@ -1353,11 +1353,13 @@ export async function generateWidgetContent(
     return null;
   }
 
-  // Reject visually valid but inert widgets whose classic inline JS cannot parse.
-  const scriptSyntaxFailure = findInteractiveScriptSyntaxFailure(html);
-  if (scriptSyntaxFailure) {
+  // Reject visually valid but inert widgets whose JavaScript cannot start.
+  const scriptFailure = findInteractiveScriptFailure(html);
+  if (scriptFailure) {
+    const location =
+      scriptFailure.scriptIndex === null ? 'an inline event handler' : `script #${scriptFailure.scriptIndex}`;
     log.error(
-      `Generated ${widgetType} widget contains invalid inline JavaScript in script #${scriptSyntaxFailure.scriptIndex}: ${scriptSyntaxFailure.message}`,
+      `Generated ${widgetType} widget contains invalid JavaScript in ${location}: ${scriptFailure.message}`,
     );
     options.onFailure?.({ code: 'invalid-model-output' });
     return null;

@@ -93,11 +93,12 @@ const BUILT_IN_IMPORT =
 
 /**
  * Reading an incoming request's `Authorization` (or `Proxy-Authorization`)
- * header: a bearer credential, which only a host auth method may interpret.
+ * header: a user bearer credential, which only a host auth method may
+ * interpret. The server-to-server integration boundary is the one exception:
+ * it compares a shared secret and never resolves an owner identity.
  * The app sets `Authorization` on its own outgoing provider requests (API
  * keys), which is not a read and is not matched; no current code reads the
- * incoming header with `.get()`, so this has no allowlist outside the host
- * directory.
+ * incoming header with `.get()` outside those two server-only boundaries.
  */
 const AUTHORIZATION_READ = /\.get\(\s*['"`](?:proxy-)?authorization['"`]\s*\)/i;
 
@@ -111,6 +112,8 @@ const RETIRED_GATEWAY_CONFIG = /TRUSTED_PROXY_|\bOWNER_AUTHENTICATOR\b/;
 const RETIRED_CONFIG_MODULE = join('lib', 'server', 'identity', 'retired-config.ts');
 /** Where a host keeps its own auth methods: the only place identity headers may be read. */
 const HOST_METHODS = ['lib', 'server', 'identity', 'host'].join(sep) + sep;
+/** Server-to-server integration auth uses Bearer without resolving a user identity. */
+const SERVER_INTEGRATION_AUTH = join('lib', 'server', 'integration', 'auth.ts');
 
 function packageSourceDirs(): string[] {
   const dirs: string[] = [];
@@ -162,6 +165,7 @@ describe('owner identity boundary', () => {
     expect(cookieModule).toMatch(/anonymous_id/);
     const registry = readFileSync(join(ROOT, IDENTITY_MODULE, 'registry.ts'), 'utf8');
     expect(registry).toMatch(BUILT_IN_IMPORT);
+    expect(readFileSync(join(ROOT, SERVER_INTEGRATION_AUTH), 'utf8')).toMatch(AUTHORIZATION_READ);
     expect('const x = process.env.TRUSTED_PROXY_SECRET;').toMatch(RETIRED_GATEWAY_CONFIG);
     expect("env('OWNER_AUTHENTICATOR')").toMatch(RETIRED_GATEWAY_CONFIG);
     expect('import { readAnonymousOwnerId }').toMatch(BUILT_IN_IMPORT);
@@ -246,8 +250,9 @@ describe('owner identity boundary', () => {
     expect(offenders(GATEWAY_IDENTITY, outsideHostMethods)).toEqual([]);
   });
 
-  it('reads an incoming Authorization header only in the host methods directory', () => {
-    expect(offenders(AUTHORIZATION_READ, outsideHostMethods)).toEqual([]);
+  it('reads an incoming Authorization header only at identity or integration boundaries', () => {
+    const outsideAllowed = outsideHostMethods.filter((file) => file !== SERVER_INTEGRATION_AUTH);
+    expect(offenders(AUTHORIZATION_READ, outsideAllowed)).toEqual([]);
   });
 
   it('keeps the built-in methods and resolution internals inside core identity', () => {

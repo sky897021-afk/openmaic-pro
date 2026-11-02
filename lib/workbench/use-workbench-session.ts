@@ -22,9 +22,14 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { HOST_AGENT_LIFECYCLE as LIFECYCLE } from '@/lib/agent-runtime/lifecycle';
 import { getDocumentStore } from '@/lib/document-store/store';
 import type { AppDocumentOutline } from '@/lib/document-store/persistence-types';
-import { useStageStore } from '@/lib/store/stage';
+import {
+  captureStageContentRevision,
+  isStageContentRevisionCurrent,
+  useStageStore,
+} from '@/lib/store/stage';
 import type { SceneOutline } from '@/lib/types/generation';
 import type { Scene, Stage } from '@/lib/types/stage';
+import { hydratePBLScenesFromRuntime } from '@/lib/pbl/v2/runtime/hydration';
 import {
   appendCompactedReplayEvent,
   compactReplayEvents,
@@ -461,8 +466,16 @@ export function useStageFreshnessSync(
         if (bootstrapDocumentRef.current) {
           // The sync is the delegated initial reader: one full read, manifest first so the
           // recorded baseline is never newer than the content it describes.
+          const contentRevision = captureStageContentRevision();
           const doc = await getDocumentStore().loadDocument(requestedStage);
           if (!isCurrent()) return;
+          if (!isStageContentRevisionCurrent(contentRevision)) {
+            console.info(
+              `[workbench] stage content changed while loading ${requestedStage}; ` +
+                'discarding stale document',
+            );
+            return;
+          }
           if (!doc) {
             console.warn(`[workbench] course document unavailable for ${requestedStage}; retrying`);
             throw new Error(`course document unavailable for ${requestedStage}`);
@@ -523,8 +536,16 @@ export function useStageFreshnessSync(
       }
 
       const idsToFetch = [...diff.changed, ...diff.added];
+      const contentRevision = captureStageContentRevision();
       const fetched = await fetchScenesByIds(requestedStage, idsToFetch);
       if (!isCurrent()) return;
+      if (!isStageContentRevisionCurrent(contentRevision)) {
+        console.info(
+          `[workbench] stage content changed while fetching scenes for ${requestedStage}; ` +
+            'discarding stale scenes',
+        );
+        return;
+      }
 
       // D3-F1 structural guard: a non-empty request that fetched NOTHING must
       // abort this pass — do NOT advance `renderedManifest`, do NOT
@@ -533,6 +554,20 @@ export function useStageFreshnessSync(
       // in the retry budget; the fallback clock keeps ticking underneath. Even
       // if the chunked fetch has a bug, "could not fetch" is never recorded as
       // "already up to date".
+      // The persisted document holds the PBL design template (Hero), while the
+      // learner's current phase and work live in runtime records. A narrow
+      // scene refresh must replay that runtime layer before merging, or a
+      // perfectly valid Workspace is replaced by the document's Hero template.
+      const hydrated = await hydratePBLScenesFromRuntime(requestedStage, fetched);
+      if (!isCurrent()) return;
+      if (!isStageContentRevisionCurrent(contentRevision)) {
+        console.info(
+          `[workbench] stage content changed while hydrating scenes for ${requestedStage}; ` +
+            'discarding stale scenes',
+        );
+        return;
+      }
+
       if (idsToFetch.length > 0 && fetched.length === 0) {
         console.warn(
           `[workbench] batch scene fetch returned nothing for ${requestedStage} ` +
@@ -541,10 +576,10 @@ export function useStageFreshnessSync(
         throw new Error(`batch scene fetch returned nothing for ${requestedStage}`);
       }
 
-      const appliedIds = new Set(fetched.map((scene) => scene.id));
+      const appliedIds = new Set(hydrated.map((scene) => scene.id));
       const merge = mergeFetchedScenes({
         current: useStageStore.getState().scenes,
-        fetched,
+        fetched: hydrated,
         removedIds: diff.removed,
       });
       if (merge.changed) {

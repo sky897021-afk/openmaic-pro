@@ -176,6 +176,20 @@ export const MINERU_CLOUD_MIMES: readonly string[] = [
 export const PLAIN_TEXT_MIMES: readonly string[] = [M.txt, M.markdown, 'text/x-markdown'];
 
 /**
+ * Local Office extractor — reads the container directly, with no network call
+ * and no credentials. Modern OOXML (.docx/.pptx/.xlsx), legacy OLE
+ * (.doc/.xls) and plain CSV are all handled locally.
+ */
+export const LOCAL_DOCUMENT_MIMES: readonly string[] = [
+  M.docx,
+  M.pptx,
+  M.xlsx,
+  M.xls,
+  M.doc,
+  M.csv,
+];
+
+/**
  * AliDocMind (LLM version) image formats per the official contract:
  * JPG/JPEG/PNG/BMP/GIF. Note: no WebP or JP2 (unlike MinerU).
  * https://help.aliyun.com/zh/document-mind/developer-reference/document-parsing-large-model-version
@@ -193,12 +207,23 @@ export const ALIDOCMIND_MIMES: readonly string[] = [
   ...ALIDOCMIND_IMAGE_MIMES,
 ];
 
+/**
+ * Local OCR-capable extractor: PDFs plus the raster formats a phone camera or
+ * a scanner produces. PDF text is read locally first — only pages that carry no
+ * text layer are rasterized and sent to a vision model — so text PDFs behave
+ * exactly as they do under `unpdf`. Images have no text layer by definition, so
+ * they go straight to the model.
+ */
+export const VISION_OCR_MIMES: readonly string[] = [M.pdf, M.png, M.jpeg, M.webp];
+
 export const PROVIDER_SUPPORTED_MIME_TYPES: Record<string, readonly string[]> = {
   unpdf: [M.pdf],
   mineru: MINERU_SELFHOST_MIMES,
   'mineru-cloud': MINERU_CLOUD_MIMES,
   alidocmind: ALIDOCMIND_MIMES,
+  'vision-ocr': VISION_OCR_MIMES,
   'plain-text': PLAIN_TEXT_MIMES,
+  'local-document': LOCAL_DOCUMENT_MIMES,
 };
 
 // ─── Media (audio/video) provider capability matrix ──────────────────────────

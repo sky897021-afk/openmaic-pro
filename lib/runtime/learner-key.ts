@@ -12,7 +12,11 @@
  */
 import { BrowserKVStore, type KVStore } from '@openmaic/storage';
 
-import { registerRuntimeStorageResetHook, resolveConfiguredLearnerKey } from './config';
+import {
+  getConfiguredLearnerKeyProvider,
+  registerRuntimeStorageResetHook,
+  resolveConfiguredLearnerKey,
+} from './config';
 
 export const LEARNER_KEY_KV_KEY = 'runtime.learnerKey';
 
@@ -79,18 +83,34 @@ async function readOrMint(store: KVStore): Promise<string> {
  * configuration module; reload after changing bootstrap configuration.
  */
 export function getLearnerKey(kv?: KVStore): Promise<string> {
+  // A configured (server-derived) identity outranks an injected KV store.
+  // Runtime callers pass a KV for watermarks and local caches, not to opt out
+  // of the server partition: under server persistence the stage owner is
+  // `openmaic-shared`, and an `anon:` key here is refused by the HTTP runtime
+  // store with 403 FORBIDDEN_LEARNER. The injected store only bypasses the
+  // config when NO server identity exists (local-only tests/deployments).
+  if (getConfiguredLearnerKeyProvider()) {
+    // Resolve the provider at most once: a second call would re-invoke it even
+    // though the first resolution is still (or already) latched.
+    if (!configuredInFlight) {
+      const configured = resolveConfiguredLearnerKey();
+      if (configured) {
+        configuredInFlight = configured.catch((error) => {
+          configuredInFlight = undefined;
+          throw error;
+        });
+      }
+    }
+    if (configuredInFlight) return configuredInFlight;
+  }
+
   // Injected stores (tests, server-side callers) bypass the memo but stay
   // race-safe through the lock / read-after-write above.
   if (kv) return readOrMint(kv);
 
-  const configured = configuredInFlight ?? resolveConfiguredLearnerKey();
-  if (configured) {
-    configuredInFlight ??= configured.catch((error) => {
-      configuredInFlight = undefined;
-      throw error;
-    });
-    return configuredInFlight;
-  }
+  // No injected store and no configured identity: preserve the original
+  // sealing semantics — a key resolved here must not race a later bootstrap.
+  resolveConfiguredLearnerKey();
   // Concurrent same-bundle callers share one in-flight read/mint. A failure
   // is not cached — a transient storage error must not pin every later call.
   defaultInFlight ??= readOrMint((defaultKv ??= new BrowserKVStore())).catch((error) => {

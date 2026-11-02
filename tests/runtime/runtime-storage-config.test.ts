@@ -97,7 +97,7 @@ describe('configureRuntimeStorage', () => {
     );
   });
 
-  it('gives an explicit KV store priority over the configured learnerKey provider', async () => {
+  it('gives the configured server learnerKey priority over an injected KV store', async () => {
     const learnerKey = vi.fn(() => 'account:user-42');
     const kv = {
       get: vi.fn().mockResolvedValue('anon:explicit-kv'),
@@ -106,9 +106,22 @@ describe('configureRuntimeStorage', () => {
     const { getLearnerKey } = await import('@/lib/runtime/learner-key');
     configureRuntimeStorage({ learnerKey });
 
+    // Under server persistence the stage owner is the server-derived identity.
+    // An injected KV is for local watermarks, not an identity override; using
+    // its `anon:` key would be refused by the HTTP runtime store (403).
+    await expect(getLearnerKey(kv)).resolves.toBe('account:user-42');
+    expect(kv.get).not.toHaveBeenCalled();
+    expect(learnerKey).toHaveBeenCalledOnce();
+  });
+
+  it('still gives an injected KV store priority when no learnerKey is configured', async () => {
+    const kv = {
+      get: vi.fn().mockResolvedValue('anon:explicit-kv'),
+    } as unknown as KVStore;
+    const { getLearnerKey } = await import('@/lib/runtime/learner-key');
+
     await expect(getLearnerKey(kv)).resolves.toBe('anon:explicit-kv');
     expect(kv.get).toHaveBeenCalledExactlyOnceWith('runtime.learnerKey', 'device');
-    expect(learnerKey).not.toHaveBeenCalled();
   });
 
   it('deduplicates configured learnerKey resolution and latches its first value', async () => {

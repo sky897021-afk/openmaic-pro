@@ -1,9 +1,13 @@
+import { officeDocumentExtractorProvider } from './office-document';
 import { pdfDocumentExtractorProviders } from './pdf';
 import { textDocumentExtractorProvider } from './text';
 import type { DocumentExtractorProvider, DocumentExtractorProviderId } from '../types';
 
 const documentExtractorProviders = [
   textDocumentExtractorProvider,
+  // Local Office sits between raw text and the cloud PDF providers: it needs no
+  // credential, so auto-selection must reach it before MinerU/AliDocMind.
+  officeDocumentExtractorProvider,
   ...pdfDocumentExtractorProviders,
 ];
 

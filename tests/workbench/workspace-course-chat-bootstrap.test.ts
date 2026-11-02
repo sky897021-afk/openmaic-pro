@@ -390,20 +390,45 @@ describe('a course opened without a conversation', () => {
     expect(container?.querySelector('[data-testid="classroom-pane"]')).not.toBeNull();
   });
 
-  it('carries the most recent conversation into the middle column', async () => {
+  it('opens the most recent conversation that belongs to this course', async () => {
     mocks.sessionRows = [
-      { id: 'session-old', stageId: 'stage-9', updatedAt: 1 },
-      { id: 'session-recent', stageId: 'stage-2', updatedAt: 9 },
+      { id: 'session-course', stageId: 'stage-1', updatedAt: 1 },
+      { id: 'session-other', stageId: 'stage-2', updatedAt: 9 },
     ];
 
     await render();
 
     expect(mocks.routerReplace).toHaveBeenCalledWith(
-      '/workspace?session=session-recent&course=stage-1',
+      '/workspace?session=session-course&course=stage-1',
     );
-    // It is emphatically NOT "the session that owns this course": the recent one
-    // is about another stage entirely, and that is fine.
     expect(mocks.startFirstMessage).not.toHaveBeenCalled();
+  });
+
+  it('shows a draft instead of borrowing the most recent conversation from another course', async () => {
+    mocks.sessionRows = [
+      { id: 'session-other', stageId: 'stage-2', updatedAt: 9 },
+    ];
+
+    await render();
+
+    expect(mocks.routerReplace).not.toHaveBeenCalled();
+    expect(draft()).toMatchObject({ ownerKey: 'draft:stage-1' });
+    expect(mocks.startFirstMessage).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale attached conversation from another course', async () => {
+    mocks.store.sessionId = 'session-other';
+    mocks.store.stageId = 'stage-2';
+    mocks.sessionRows = [
+      { id: 'session-course', stageId: 'stage-1', updatedAt: 1 },
+      { id: 'session-other', stageId: 'stage-2', updatedAt: 9 },
+    ];
+
+    await render();
+
+    expect(mocks.routerReplace).toHaveBeenCalledWith(
+      '/workspace?session=session-course&course=stage-1',
+    );
   });
 
   it('offers an empty composer when the user has no conversations at all', async () => {
@@ -493,16 +518,16 @@ describe('a course opened without a conversation', () => {
     expect(mocks.startFirstMessage).not.toHaveBeenCalled();
   });
 
-  it('adopts once, then settles — a list refresh does not re-navigate', async () => {
-    mocks.sessionRows = [{ id: 'session-recent', stageId: 'stage-2', updatedAt: 9 }];
+  it('adopts once, then settles - a list refresh does not re-navigate', async () => {
+    mocks.sessionRows = [{ id: 'session-course', stageId: 'stage-1', updatedAt: 9 }];
     await render();
     expect(mocks.routerReplace).toHaveBeenCalledTimes(1);
 
-    mocks.searchParams = new URLSearchParams('session=session-recent&course=stage-1');
-    mocks.store.sessionId = 'session-recent';
+    mocks.searchParams = new URLSearchParams('session=session-course&course=stage-1');
+    mocks.store.sessionId = 'session-course';
     await render();
     await act(async () =>
-      mocks.ownerOptions?.onSessions([{ id: 'session-recent', stageId: 'stage-2', updatedAt: 9 }]),
+      mocks.ownerOptions?.onSessions([{ id: 'session-course', stageId: 'stage-1', updatedAt: 9 }]),
     );
 
     expect(mocks.routerReplace).toHaveBeenCalledTimes(1);

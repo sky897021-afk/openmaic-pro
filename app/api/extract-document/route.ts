@@ -55,6 +55,8 @@ interface ExtractRequestConfig {
   baseUrl?: string;
   accessKeyId?: string;
   accessKeySecret?: string;
+  /** Language model for a model-backed provider (`vision-ocr`). */
+  model?: string;
 }
 
 /** JSON body for the asset-id form: an asset id plus the same provider config. */
@@ -73,6 +75,7 @@ const ASSET_ID_EXTRACT_STRING_FIELDS = [
   'baseUrl',
   'accessKeyId',
   'accessKeySecret',
+  'model',
 ] as const;
 
 /** Mutable logging context shared with the shared extraction helper. */
@@ -413,6 +416,10 @@ async function runExtraction(
     accessKeySecret: managed
       ? managedAliCreds?.accessKeySecret
       : requestConfig.accessKeySecret || undefined,
+    // The model is the caller's choice, not a credential — a managed provider
+    // never pins it. Empty leaves a model-backed provider (vision-ocr) to
+    // resolve a server-managed model itself.
+    model: requestConfig.model || undefined,
     // Env fallback is a last resort for a managed provider (defensive; the
     // resolver already covers env+YAML).
     allowEnvFallback: managed,
@@ -466,6 +473,7 @@ export async function POST(req: NextRequest) {
         baseUrl: (formData.get('baseUrl') as string | null) ?? undefined,
         accessKeyId: (formData.get('accessKeyId') as string | null) ?? undefined,
         accessKeySecret: (formData.get('accessKeySecret') as string | null) ?? undefined,
+        model: (formData.get('model') as string | null) ?? undefined,
       };
 
       if (!documentFile) {
@@ -627,6 +635,7 @@ export async function POST(req: NextRequest) {
         baseUrl: body.baseUrl,
         accessKeyId: body.accessKeyId,
         accessKeySecret: body.accessKeySecret,
+        model: body.model,
       };
     } else {
       log.error('Invalid Content-Type for document upload:', contentType);

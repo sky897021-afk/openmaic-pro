@@ -661,6 +661,7 @@ export function HomePage({ mode }: HomePageProps) {
             settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].accessKeyId,
           accessKeySecret:
             settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].accessKeySecret,
+          model: settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].model,
         }
       : undefined;
 

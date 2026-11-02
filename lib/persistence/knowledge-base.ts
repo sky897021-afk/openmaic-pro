@@ -199,6 +199,22 @@ export async function markKnowledgeIndexing(
 const CHUNK_INSERT_BATCH = 200;
 
 /**
+ * The `VALUES` list for one batch of chunk rows.
+ *
+ * Every row repeats the two shared bindings (`$1` owner, `$2` material) and
+ * then takes **three** of its own — ordinal, text, embedding — so the per-row
+ * stride is 3, not 5. A stride that disagrees with the order `values` is
+ * pushed in produces a statement whose highest placeholder outruns the bind
+ * list, which Postgres rejects for the whole batch.
+ */
+export function chunkInsertPlaceholders(rowCount: number): string {
+  return Array.from(
+    { length: rowCount },
+    (_, index) => `($1, $2, $${index * 3 + 3}, $${index * 3 + 4}, $${index * 3 + 5})`,
+  ).join(', ');
+}
+
+/**
  * Replace a document's chunks and mark it ready — atomically.
  *
  * The delete and the inserts share one transaction with the state change, so
@@ -221,12 +237,7 @@ export async function storeKnowledgeIndex(
     );
     for (let start = 0; start < input.chunks.length; start += CHUNK_INSERT_BATCH) {
       const batch = input.chunks.slice(start, start + CHUNK_INSERT_BATCH);
-      const placeholders = batch
-        .map((_, index) => {
-          const base = index * 5;
-          return `($1, $2, $${base + 3}, $${base + 4}, $${base + 5})`;
-        })
-        .join(', ');
+      const placeholders = chunkInsertPlaceholders(batch.length);
       const values: unknown[] = [ownerId, materialId];
       for (const [index, chunk] of batch.entries()) {
         values.push(start + index, chunk.text, Buffer.from(chunk.embedding));
@@ -290,10 +301,10 @@ export async function deleteKnowledgeDocument(
 ): Promise<void> {
   const withTransaction = nodePostgresTransaction(queryable);
   await withTransaction(async (tx) => {
-    await tx.query(
-      `DELETE FROM owner_knowledge_chunk WHERE owner_id = $1 AND material_id = $2`,
-      [ownerId, materialId],
-    );
+    await tx.query(`DELETE FROM owner_knowledge_chunk WHERE owner_id = $1 AND material_id = $2`, [
+      ownerId,
+      materialId,
+    ]);
     await tx.query(
       `DELETE FROM owner_knowledge_document WHERE owner_id = $1 AND material_id = $2`,
       [ownerId, materialId],

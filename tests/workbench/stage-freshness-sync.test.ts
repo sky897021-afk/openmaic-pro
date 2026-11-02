@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   loadDocument: vi.fn(),
+  hydratePBLScenesFromRuntime: vi.fn(),
   // Stage store — a tiny in-memory zustand lookalike the sync drives.
   stageState: {
     stage: null as { id: string } | null,
@@ -37,12 +38,14 @@ const mocks = vi.hoisted(() => ({
     serverManifestByStage: {} as Record<string, unknown>,
   },
   stageSubscribers: [] as ((state: unknown, prev: unknown) => void)[],
+  stageContentRevision: 0,
   workbenchState: { panelOpen: true, playbackOn: false },
   // Server doubles.
   manifest: { rev: 1, scenes: [] as { id: string; order: number; rev: number }[] },
   sceneContent: {} as Record<string, Record<string, unknown>>,
   manifestUnavailable: false,
   batchUnavailable: false,
+  sceneFetchGate: null as Promise<void> | null,
   /**
    * The batch endpoint's per-request id cap, mirroring the real route's
    * `MAX_BATCH_SCENE_IDS` as a LITERAL in the test (the client must chunk
@@ -71,6 +74,8 @@ vi.mock('@/lib/workbench/session-store', () => ({
 }));
 
 vi.mock('@/lib/store/stage', () => ({
+  captureStageContentRevision: () => mocks.stageContentRevision,
+  isStageContentRevisionCurrent: (revision: number) => revision === mocks.stageContentRevision,
   useStageStore: {
     getState: () => mocks.stageState,
     // zustand semantics: `prev` is the PRE-STATE snapshot (a distinct object),
@@ -83,7 +88,9 @@ vi.mock('@/lib/store/stage', () => ({
         typeof patch === 'function'
           ? { ...prev, ...(patch as (s: typeof prev) => Record<string, unknown>)(prev) }
           : { ...prev, ...(patch as Partial<typeof prev>) };
+      const contentChanged = next.stage !== prev.stage || next.scenes !== prev.scenes;
       Object.assign(mocks.stageState, next);
+      if (contentChanged) mocks.stageContentRevision += 1;
       for (const listener of mocks.stageSubscribers) listener(mocks.stageState, prev);
     },
     subscribe: (listener: (state: unknown, prev: unknown) => void) => {
@@ -100,7 +107,12 @@ vi.mock('@/lib/document-store/store', () => ({
   getDocumentStore: () => ({ loadDocument: mocks.loadDocument }),
 }));
 
+vi.mock('@/lib/pbl/v2/runtime/hydration', () => ({
+  hydratePBLScenesFromRuntime: mocks.hydratePBLScenesFromRuntime,
+}));
+
 import { useStageFreshnessSync } from '@/lib/workbench/use-workbench-session';
+import { useStageStore } from '@/lib/store/stage';
 
 // ── server doubles ──────────────────────────────────────────────────────────
 
@@ -221,6 +233,7 @@ function wireFetch(): void {
     if (url.includes('/scenes?')) {
       const ids = new URL(url, 'http://localhost').searchParams.get('ids')!.split(',');
       mocks.batchCalls.push(ids);
+      if (mocks.sceneFetchGate) await mocks.sceneFetchGate;
       // The server double enforces the same per-request cap as the real route
       // (a literal 200): if the client stopped chunking, one over-cap request
       // answers 400 exactly like production and the pass aborts.
@@ -327,14 +340,20 @@ beforeEach(() => {
   mocks.workbenchState.panelOpen = true;
   mocks.workbenchState.playbackOn = false;
   mocks.loadDocument.mockReset();
+  mocks.hydratePBLScenesFromRuntime.mockReset();
+  mocks.hydratePBLScenesFromRuntime.mockImplementation(
+    async (_stageId: string, scenes: unknown[]) => scenes,
+  );
   mocks.loadCount = 0;
   mocks.manifestFetchCount = 0;
   mocks.batchCalls = [];
   mocks.batchBytes = 0;
   mocks.manifestUnavailable = false;
   mocks.batchUnavailable = false;
+  mocks.sceneFetchGate = null;
   mocks.batchMaxIds = 200;
   mocks.stageSubscribers = [];
+  mocks.stageContentRevision = 0;
   MockEventSource.instances = [];
   abandonedRenderObserved = () => undefined;
   seedCourse(1);
@@ -414,6 +433,140 @@ describe('AC1: 另一个会话改这门课 → 画布收敛（判据在画布拿
         `单场景批量 ${mocks.batchCalls.length} 次，共 ${mocks.batchBytes} bytes（每次 ${perBatch.toFixed(0)}B）。` +
         `改前等价：每 checkpoint 一次整档读（~100kB）；改后：每变化一次 ~${perBatch.toFixed(0)}B。`,
     );
+  });
+});
+
+describe('stale same-stage response fencing', () => {
+  it('discards a stale bootstrap document when the same scene becomes Workspace', async () => {
+    let resolveDocument!: (value: unknown) => void;
+    mocks.loadDocument.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDocument = resolve;
+        }),
+    );
+    await mount({ stageId: 'stage-a', bootstrapDocument: true });
+    expect(mocks.loadDocument).toHaveBeenCalledWith('stage-a');
+
+    const workspaceScene = {
+      ...sceneData('scene-1', 1),
+      title: 'Workspace scene',
+    };
+    await act(async () => {
+      useStageStore.setState({
+        stage: { id: 'stage-a' },
+        scenes: [workspaceScene],
+        currentSceneId: 'scene-1',
+      });
+    });
+
+    await act(async () => {
+      resolveDocument({
+        stage: { id: 'stage-a' },
+        scenes: [sceneData('scene-1', 1)],
+        outline: { outlines: [], generationComplete: false },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mocks.stageState.scenes).toEqual([workspaceScene]);
+    expect(mocks.stageState.scenes[0]).toMatchObject({ title: 'Workspace scene' });
+  });
+
+  it('discards a stale incremental fetch when the same scene becomes Workspace', async () => {
+    await mount();
+    const source = MockEventSource.instances[0]!;
+    let releaseFetch!: () => void;
+    mocks.sceneFetchGate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+
+    bumpSceneRev('scene-1');
+    await act(async () => source.emitFreshness());
+    expect(mocks.batchCalls.at(-1)).toEqual(['scene-1']);
+
+    const workspaceScene = {
+      ...sceneData('scene-1', 2),
+      title: 'Workspace scene',
+    };
+    await act(async () => {
+      useStageStore.setState((state) => ({
+        scenes: state.scenes.map((scene) => (scene.id === 'scene-1' ? workspaceScene : scene)),
+      }));
+    });
+
+    await act(async () => {
+      releaseFetch();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mocks.stageState.scenes.find((scene) => scene.id === 'scene-1')).toBe(workspaceScene);
+    expect(
+      (mocks.stageState.serverManifestByStage['stage-a'] as { rev?: number } | undefined)?.rev,
+    ).toBe(1);
+  });
+});
+
+describe('PBL runtime hydration before freshness merge', () => {
+  it('keeps Workspace when the document scene is the Hero design template', async () => {
+    await mount();
+    const source = MockEventSource.instances[0]!;
+    const workspaceScene = {
+      ...sceneData('scene-1', 1),
+      title: 'Workspace',
+      type: 'pbl',
+      content: { type: 'pbl', projectV2: { uiPhase: 'workspace' } },
+    };
+    await act(async () => {
+      useStageStore.setState((state) => ({
+        scenes: state.scenes.map((scene) => (scene.id === 'scene-1' ? workspaceScene : scene)),
+      }));
+    });
+
+    bumpSceneRev('scene-1');
+    const heroScene = {
+      ...sceneData('scene-1', 2),
+      title: 'Hero',
+      type: 'pbl',
+      content: { type: 'pbl', projectV2: { uiPhase: 'hero' } },
+    };
+    mocks.sceneContent['scene-1'] = heroScene;
+    mocks.hydratePBLScenesFromRuntime.mockResolvedValueOnce([workspaceScene]);
+
+    await act(async () => source.emitFreshness());
+
+    expect(mocks.hydratePBLScenesFromRuntime).toHaveBeenCalledWith('stage-a', [heroScene]);
+    expect(mocks.stageState.scenes.find((scene) => scene.id === 'scene-1')).toBe(workspaceScene);
+  });
+
+  it('allows Hero when runtime hydration says the project is still at Hero', async () => {
+    await mount();
+    const source = MockEventSource.instances[0]!;
+    const workspaceScene = {
+      ...sceneData('scene-1', 1),
+      title: 'Workspace',
+      type: 'pbl',
+      content: { type: 'pbl', projectV2: { uiPhase: 'workspace' } },
+    };
+    await act(async () => {
+      useStageStore.setState((state) => ({
+        scenes: state.scenes.map((scene) => (scene.id === 'scene-1' ? workspaceScene : scene)),
+      }));
+    });
+
+    bumpSceneRev('scene-1');
+    const heroScene = {
+      ...sceneData('scene-1', 2),
+      title: 'Hero',
+      type: 'pbl',
+      content: { type: 'pbl', projectV2: { uiPhase: 'hero' } },
+    };
+    mocks.sceneContent['scene-1'] = heroScene;
+    mocks.hydratePBLScenesFromRuntime.mockResolvedValueOnce([heroScene]);
+
+    await act(async () => source.emitFreshness());
+
+    expect(mocks.stageState.scenes.find((scene) => scene.id === 'scene-1')).toBe(heroScene);
   });
 });
 

@@ -14,6 +14,12 @@ export interface DocumentExtractorConfig {
   providerId: DocumentExtractorProviderId;
   apiKey?: string;
   baseUrl?: string;
+  /**
+   * Language model to transcribe with, for providers whose extraction IS a
+   * model call (`vision-ocr`). Empty means the provider resolves a
+   * server-managed model itself.
+   */
+  model?: string;
   /** Aliyun AccessKey ID (AliDocMind). */
   accessKeyId?: string;
   /** Aliyun AccessKey Secret (AliDocMind). */

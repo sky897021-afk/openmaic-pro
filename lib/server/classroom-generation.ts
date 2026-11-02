@@ -3,6 +3,8 @@ import { createStageAPI } from '@/lib/api/stage-api';
 import type { StageStore } from '@/lib/api/stage-api-types';
 import {
   applyOutlineFallbacks,
+  buildVisionUserContent,
+  DEFAULT_LANGUAGE_DIRECTIVE,
   generateSceneOutlinesFromRequirements,
   generateSceneActions,
   generateSceneContent,
@@ -43,7 +45,13 @@ import {
   type ClassroomTtsCoverage,
 } from '@/lib/server/classroom-media-generation';
 import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
-import type { UserRequirements } from '@/lib/types/generation';
+import { sortDocumentImagesForVision } from '@/lib/document/bundle';
+import type {
+  ImageMapping,
+  PdfImage,
+  SceneOutline,
+  UserRequirements,
+} from '@/lib/types/generation';
 import type { Scene, Stage } from '@/lib/types/stage';
 import { AGENT_COLOR_PALETTE, AGENT_DEFAULT_AVATARS } from '@/lib/constants/agent-defaults';
 
@@ -57,7 +65,12 @@ export function containPBLGenerationError(error: unknown, sceneTitle: string): n
 
 export interface GenerateClassroomInput {
   requirement: string;
-  pdfContent?: { text: string; images: string[] };
+  pdfContent?: {
+    text: string;
+    images: string[];
+    pdfImages?: PdfImage[];
+    imageMapping?: ImageMapping;
+  };
   enableWebSearch?: boolean;
   webSearchProviderId?: WebSearchProviderId;
   webSearchApiKey?: string;
@@ -67,6 +80,18 @@ export interface GenerateClassroomInput {
   enableVideoGeneration?: boolean;
   enableTTS?: boolean;
   agentMode?: 'default' | 'generate';
+  /**
+   * A teacher-approved outline. When present the pipeline does NOT generate its
+   * own: these pages are the plan it builds. This is how the integration layer
+   * carries a platform's outline review step into the classic generation
+   * pipeline without duplicating it (see `generateClassicOutlines`, which
+   * produces the version a caller can hand back here).
+   */
+  outlines?: SceneOutline[];
+  /** Course title from the approved outline; falls back to the first page title. */
+  courseTitle?: string;
+  /** Language directive from the approved outline; defaults to English. */
+  languageDirective?: string;
 }
 
 export type ClassroomGenerationStep =
@@ -248,14 +273,65 @@ function ttsResultWarning(
   return fallback;
 }
 
-export async function generateClassroom(
+/** The page plan a classic course is built from. */
+export interface ClassroomOutlinePlan {
+  courseTitle?: string;
+  languageDirective: string;
+  outlines: SceneOutline[];
+}
+
+interface ClassicOutlineContext {
+  aiCall: AICallFn;
+  requirements: UserRequirements;
+  pdfText: string | undefined;
+  pdfImages: PdfImage[];
+  imageMapping: ImageMapping;
+  visionEnabled: boolean;
+  researchContext: string | undefined;
+  vocationalActive: boolean;
+  languageModel: LanguageModel;
+  modelInfo: Awaited<ReturnType<typeof resolveModel>>['modelInfo'];
+  thinking: ThinkingConfig | undefined;
+  serverManaged: boolean;
+}
+
+type ClassroomProgressHandler = (progress: ClassroomGenerationProgress) => Promise<void> | void;
+
+function resolveClassroomImageContext(
+  pdfContent: GenerateClassroomInput['pdfContent'],
+): { pdfImages: PdfImage[]; imageMapping: ImageMapping } {
+  const suppliedImages = pdfContent?.pdfImages ?? [];
+  const pdfImages =
+    suppliedImages.length > 0
+      ? suppliedImages
+      : (pdfContent?.images ?? []).map((src, index) => ({
+          id: `img_${index + 1}`,
+          src,
+          pageNumber: index + 1,
+        }));
+  const suppliedMapping = pdfContent?.imageMapping ?? {};
+  const imageMapping = Object.fromEntries(
+    pdfImages.flatMap((image) => {
+      const src = suppliedMapping[image.id] || image.src;
+      return src ? [[image.id, src] as const] : [];
+    }),
+  );
+  return { pdfImages, imageMapping };
+}
+
+/**
+ * Resolve the classroom model, the resource text and the optional research
+ * context.
+ *
+ * Shared by the generation job and `generateClassicOutlines`, so both use the
+ * SAME model resolution, web-search configuration and credential checks. An
+ * outline endpoint that resolved its own model would show the teacher a plan
+ * the pipeline then renders from different inputs.
+ */
+async function prepareClassicOutlineContext(
   input: GenerateClassroomInput,
-  options: {
-    baseUrl: string;
-    signal?: AbortSignal;
-    onProgress?: (progress: ClassroomGenerationProgress) => Promise<void> | void;
-  },
-): Promise<GenerateClassroomResult> {
+  options: { onProgress?: ClassroomProgressHandler } = {},
+): Promise<ClassicOutlineContext> {
   const { requirement, pdfContent } = input;
 
   await options.onProgress?.({
@@ -271,7 +347,7 @@ export async function generateClassroom(
     modelString,
     providerId,
     apiKey,
-    thinkingConfig: classroomThinking,
+    thinkingConfig: thinking,
     serverManaged,
   } = await resolveModel({ stage: 'generate-classroom' });
   log.info(`Using server-configured model: ${modelString}`);
@@ -290,10 +366,42 @@ export async function generateClassroom(
   // configured). This keeps a misconfigured optional route from aborting all
   // classroom generation, and skips the extra resolution when web search is off.
   let searchQueryModel = languageModel;
-  let searchQueryThinking = classroomThinking;
+  let searchQueryThinking = thinking;
   let searchQueryServerManaged = serverManaged;
 
-  const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
+  const { pdfImages, imageMapping } = resolveClassroomImageContext(pdfContent);
+  const visionEnabled =
+    Boolean(modelInfo?.capabilities?.vision) &&
+    pdfImages.length > 0 &&
+    Object.keys(imageMapping).length > 0;
+
+  const aiCall: AICallFn = async (systemPrompt, userPrompt, images) => {
+    if (visionEnabled && images?.length) {
+      try {
+        const result = await callLLM(
+          {
+            model: languageModel,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: buildVisionUserContent(userPrompt, images) },
+            ],
+            maxOutputTokens: modelInfo?.outputWindow,
+          },
+          'generate-classroom',
+          undefined,
+          thinking,
+          { serverManaged },
+        );
+        return result.text;
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        log.warn(
+          'Classroom vision call failed; continuing with text-only outline generation:',
+          error,
+        );
+      }
+    }
+
     const result = await callLLM(
       {
         model: languageModel,
@@ -305,11 +413,202 @@ export async function generateClassroom(
       },
       'generate-classroom',
       undefined,
-      classroomThinking,
+      thinking,
       { serverManaged },
     );
     return result.text;
   };
+
+  const searchQueryAiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
+    const result = await callLLM(
+      {
+        model: searchQueryModel,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        maxOutputTokens: 256,
+      },
+      'web-search-query-rewrite',
+      undefined,
+      searchQueryThinking,
+      { serverManaged: searchQueryServerManaged },
+    );
+    return result.text;
+  };
+
+  const requirements: UserRequirements = { requirement };
+  const vocationalActive = resolveVocationalActive(requirements);
+  const pdfText = pdfContent?.text || undefined;
+
+  await options.onProgress?.({
+    step: 'researching',
+    progress: 10,
+    message: 'Researching topic',
+    scenesGenerated: 0,
+  });
+
+  // Web search (optional, graceful degradation)
+  let researchContext: string | undefined;
+  // Skipped when an outline was supplied: research context only feeds outline
+  // generation, and an approved plan has already made that decision. Running a
+  // search for it would spend a request and minutes for no output.
+  if (input.enableWebSearch && !input.outlines?.length) {
+    const webSearchConfig = resolveClassroomWebSearchConfig(input);
+    if (webSearchConfig) {
+      // Re-resolve the query-rewrite model only when explicitly routed. If
+      // resolution itself fails (e.g. unknown provider in the route), fall back
+      // to the classroom model here; a route with a missing key resolves fine
+      // and surfaces only later in callLLM, which the outer try/catch below
+      // degrades gracefully — either way the pipeline still works.
+      const rewriteRoute = getStageModel('web-search-query-rewrite');
+      if (rewriteRoute) {
+        try {
+          const rewriteResolved = await resolveModel({ stage: 'web-search-query-rewrite' });
+          searchQueryModel = rewriteResolved.model;
+          searchQueryThinking = rewriteResolved.thinkingConfig;
+          searchQueryServerManaged = rewriteResolved.serverManaged;
+        } catch (err) {
+          log.warn(
+            `web-search-query-rewrite route "${rewriteRoute}" unavailable; using classroom model for query rewrite`,
+            err,
+          );
+        }
+      }
+      try {
+        const searchQuery = await buildSearchQuery(requirement, pdfText, searchQueryAiCall);
+
+        log.info('Running web search for classroom generation', {
+          hasPdfContext: searchQuery.hasPdfContext,
+          rawRequirementLength: searchQuery.rawRequirementLength,
+          rewriteAttempted: searchQuery.rewriteAttempted,
+          finalQueryLength: searchQuery.finalQueryLength,
+        });
+
+        const searchResult = await searchWeb({
+          providerId: webSearchConfig.providerId,
+          query: searchQuery.query,
+          apiKey: webSearchConfig.apiKey,
+          baseUrl: webSearchConfig.baseUrl,
+          baiduSubSources: webSearchConfig.baiduSubSources,
+          claudeModelId: webSearchConfig.claudeModelId,
+        });
+        researchContext = formatSearchResultsAsContext(searchResult);
+        if (researchContext) {
+          log.info(`Web search returned ${searchResult.sources.length} sources`);
+        }
+      } catch (e) {
+        log.warn('Web search failed, continuing without search context:', e);
+      }
+    } else {
+      log.warn('enableWebSearch is true but no web search API key configured, skipping web search');
+    }
+  }
+
+  return {
+    aiCall,
+    requirements,
+    pdfText,
+    pdfImages,
+    imageMapping,
+    visionEnabled,
+    researchContext,
+    vocationalActive,
+    languageModel,
+    modelInfo,
+    thinking,
+    serverManaged,
+  };
+}
+
+/**
+ * Generate the outline a classic course will be built from.
+ *
+ * Exported for the integration layer: the platform displays this JSON, the
+ * teacher edits it, and the approved version travels back in
+ * `GenerateClassroomInput.outlines`. Generating it through the same context as
+ * the job means the plan shown is the plan the pipeline can render.
+ */
+export async function generateClassicOutlines(
+  input: GenerateClassroomInput,
+  options: { onProgress?: ClassroomProgressHandler } = {},
+): Promise<ClassroomOutlinePlan> {
+  const context = await prepareClassicOutlineContext(input, options);
+  return runClassicOutlineGeneration(context, input);
+}
+
+/**
+ * What the pipeline should build from: the caller's approved outline when one
+ * was supplied, otherwise a freshly generated one.
+ */
+export async function resolveClassroomOutlinePlan(
+  input: GenerateClassroomInput,
+  generate: () => Promise<ClassroomOutlinePlan>,
+): Promise<ClassroomOutlinePlan> {
+  return approvedOutlinePlan(input) ?? generate();
+}
+
+function approvedOutlinePlan(input: GenerateClassroomInput): ClassroomOutlinePlan | undefined {
+  if (!input.outlines?.length) return undefined;
+  log.info(`Using the approved outline (${input.outlines.length} scenes)`);
+  return {
+    languageDirective: input.languageDirective?.trim() || DEFAULT_LANGUAGE_DIRECTIVE,
+    ...(input.courseTitle?.trim() ? { courseTitle: input.courseTitle.trim() } : {}),
+    outlines: input.outlines,
+  };
+}
+
+async function runClassicOutlineGeneration(
+  context: ClassicOutlineContext,
+  input: GenerateClassroomInput,
+): Promise<ClassroomOutlinePlan> {
+  const outlinesResult = await generateSceneOutlinesFromRequirements(
+    context.requirements,
+    context.pdfText,
+    context.pdfImages,
+    context.aiCall,
+    {
+      imageGenerationEnabled: input.enableImageGeneration,
+      videoGenerationEnabled: input.enableVideoGeneration,
+      researchContext: context.researchContext,
+      imageMapping: context.imageMapping,
+      visionEnabled: context.visionEnabled,
+      // NO teacherContext — agents haven't been generated yet
+    },
+  );
+
+  if (!outlinesResult.success || !outlinesResult.data) {
+    log.error('Failed to generate outlines:', outlinesResult.error);
+    throw new Error(outlinesResult.error || 'Failed to generate scene outlines');
+  }
+
+  const { languageDirective, courseTitle, outlines } = outlinesResult.data;
+  log.info(
+    `Generated ${outlines.length} scene outlines (languageDirective: ${languageDirective}, courseTitle: ${courseTitle ?? 'n/a'})`,
+  );
+  return { languageDirective, courseTitle, outlines };
+}
+
+export async function generateClassroom(
+  input: GenerateClassroomInput,
+  options: {
+    baseUrl: string;
+    signal?: AbortSignal;
+    onProgress?: (progress: ClassroomGenerationProgress) => Promise<void> | void;
+  },
+): Promise<GenerateClassroomResult> {
+  const { requirement } = input;
+
+  const context = await prepareClassicOutlineContext(input, {
+    onProgress: options.onProgress,
+  });
+  const {
+    vocationalActive,
+    languageModel,
+    modelInfo,
+    thinking: classroomThinking,
+    serverManaged,
+  } = context;
 
   // Per-stage model resolution for the scene pipeline. The classroom used to
   // bind a single `languageModel` (from the `generate-classroom` stage) into one
@@ -331,6 +630,7 @@ export async function generateClassroom(
       outputWindow?: number;
       thinking: ThinkingConfig | undefined;
       serverManaged: boolean;
+      visionEnabled: boolean;
     }
   >();
 
@@ -341,6 +641,7 @@ export async function generateClassroom(
     outputWindow?: number;
     thinking: ThinkingConfig | undefined;
     serverManaged: boolean;
+    visionEnabled: boolean;
   }> => {
     const cached = stageModelCache.get(stage);
     if (cached) return cached;
@@ -352,6 +653,7 @@ export async function generateClassroom(
         outputWindow: modelInfo?.outputWindow,
         thinking: classroomThinking,
         serverManaged,
+        visionEnabled: Boolean(modelInfo?.capabilities?.vision),
       };
       stageModelCache.set(stage, fallback);
       return fallback;
@@ -364,6 +666,7 @@ export async function generateClassroom(
         outputWindow: resolved.modelInfo?.outputWindow,
         thinking: resolved.thinkingConfig,
         serverManaged: resolved.serverManaged,
+        visionEnabled: Boolean(resolved.modelInfo?.capabilities?.vision),
       };
       log.info(`Stage "${stage}" routed to model: ${resolved.modelString}`);
       stageModelCache.set(stage, entry);
@@ -379,6 +682,7 @@ export async function generateClassroom(
         outputWindow: modelInfo?.outputWindow,
         thinking: classroomThinking,
         serverManaged,
+        visionEnabled: Boolean(modelInfo?.capabilities?.vision),
       };
       stageModelCache.set(stage, fallback);
       return fallback;
@@ -394,8 +698,36 @@ export async function generateClassroom(
   // aiCall closure, and consumes the route's thinking config separately.
   const resolveSceneContentCall = async (outlineType?: string) => {
     const stage = (outlineType ? `scene-content:${outlineType}` : 'scene-content') as LlmStage;
-    const { model, outputWindow, thinking, serverManaged } = await resolveStageModel(stage);
-    const aiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
+    const { model, outputWindow, thinking, serverManaged, visionEnabled } =
+      await resolveStageModel(stage);
+    const aiCall: AICallFn = async (systemPrompt, userPrompt, images) => {
+      if (visionEnabled && images?.length) {
+        try {
+          const result = await callLLM(
+            {
+              model,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: buildVisionUserContent(userPrompt, images) },
+              ],
+              maxOutputTokens: outputWindow,
+              maxRetries: 0,
+            },
+            'generate-classroom-scene',
+            undefined,
+            thinking,
+            { serverManaged },
+          );
+          return result.text;
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          log.warn(
+            `Scene vision call failed for "${outlineType ?? 'default'}"; continuing text-only:`,
+            error,
+          );
+        }
+      }
+
       const result = await callLLM(
         {
           model,
@@ -413,7 +745,7 @@ export async function generateClassroom(
       );
       return result.text;
     };
-    return { aiCall, model, thinking };
+    return { aiCall, model, thinking, visionEnabled };
   };
 
   // agent-profiles routes via the `agent-profiles` stage (matches the browser
@@ -470,125 +802,25 @@ export async function generateClassroom(
     return sceneActionsAiCall;
   };
 
-  const searchQueryAiCall: AICallFn = async (systemPrompt, userPrompt, _images) => {
-    const result = await callLLM(
-      {
-        model: searchQueryModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        maxOutputTokens: 256,
-      },
-      'web-search-query-rewrite',
-      undefined,
-      searchQueryThinking,
-      { serverManaged: searchQueryServerManaged },
-    );
-    return result.text;
-  };
-
-  const requirements: UserRequirements = {
-    requirement,
-  };
-  const vocationalActive = resolveVocationalActive(requirements);
-  const pdfText = pdfContent?.text || undefined;
-
-  await options.onProgress?.({
-    step: 'researching',
-    progress: 10,
-    message: 'Researching topic',
-    scenesGenerated: 0,
-  });
-
-  // Web search (optional, graceful degradation)
-  let researchContext: string | undefined;
-  if (input.enableWebSearch) {
-    const webSearchConfig = resolveClassroomWebSearchConfig(input);
-    if (webSearchConfig) {
-      // Re-resolve the query-rewrite model only when explicitly routed. If
-      // resolution itself fails (e.g. unknown provider in the route), fall back
-      // to the classroom model here; a route with a missing key resolves fine
-      // and surfaces only later in callLLM, which the outer try/catch below
-      // degrades gracefully — either way the pipeline still works.
-      const rewriteRoute = getStageModel('web-search-query-rewrite');
-      if (rewriteRoute) {
-        try {
-          const rewriteResolved = await resolveModel({ stage: 'web-search-query-rewrite' });
-          searchQueryModel = rewriteResolved.model;
-          searchQueryThinking = rewriteResolved.thinkingConfig;
-          searchQueryServerManaged = rewriteResolved.serverManaged;
-        } catch (err) {
-          log.warn(
-            `web-search-query-rewrite route "${rewriteRoute}" unavailable; using classroom model for query rewrite`,
-            err,
-          );
-        }
-      }
-      try {
-        const searchQuery = await buildSearchQuery(requirement, pdfText, searchQueryAiCall);
-
-        log.info('Running web search for classroom generation', {
-          hasPdfContext: searchQuery.hasPdfContext,
-          rawRequirementLength: searchQuery.rawRequirementLength,
-          rewriteAttempted: searchQuery.rewriteAttempted,
-          finalQueryLength: searchQuery.finalQueryLength,
-        });
-
-        const searchResult = await searchWeb({
-          providerId: webSearchConfig.providerId,
-          query: searchQuery.query,
-          apiKey: webSearchConfig.apiKey,
-          baseUrl: webSearchConfig.baseUrl,
-          baiduSubSources: webSearchConfig.baiduSubSources,
-          claudeModelId: webSearchConfig.claudeModelId,
-        });
-        researchContext = formatSearchResultsAsContext(searchResult);
-        if (researchContext) {
-          log.info(`Web search returned ${searchResult.sources.length} sources`);
-        }
-      } catch (e) {
-        log.warn('Web search failed, continuing without search context:', e);
-      }
-    } else {
-      log.warn('enableWebSearch is true but no web search API key configured, skipping web search');
-    }
-  }
-
+  const usingApprovedOutline = Boolean(input.outlines?.length);
   await options.onProgress?.({
     step: 'generating_outlines',
     progress: 15,
-    message: 'Generating scene outlines',
+    message: usingApprovedOutline ? 'Using the approved outline' : 'Generating scene outlines',
     scenesGenerated: 0,
   });
 
-  const outlinesResult = await generateSceneOutlinesFromRequirements(
-    requirements,
-    pdfText,
-    undefined,
-    aiCall,
-    {
-      imageGenerationEnabled: input.enableImageGeneration,
-      videoGenerationEnabled: input.enableVideoGeneration,
-      researchContext,
-      // NO teacherContext — agents haven't been generated yet
-    },
-  );
-
-  if (!outlinesResult.success || !outlinesResult.data) {
-    log.error('Failed to generate outlines:', outlinesResult.error);
-    throw new Error(outlinesResult.error || 'Failed to generate scene outlines');
-  }
-
-  const { languageDirective, courseTitle, outlines } = outlinesResult.data;
-  log.info(
-    `Generated ${outlines.length} scene outlines (languageDirective: ${languageDirective}, courseTitle: ${courseTitle ?? 'n/a'})`,
+  const { languageDirective, courseTitle, outlines } = await resolveClassroomOutlinePlan(
+    input,
+    () => runClassicOutlineGeneration(context, input),
   );
 
   await options.onProgress?.({
     step: 'generating_outlines',
     progress: 30,
-    message: `Generated ${outlines.length} scene outlines`,
+    message: usingApprovedOutline
+      ? `Using the approved outline (${outlines.length} scenes)`
+      : `Generated ${outlines.length} scene outlines`,
     scenesGenerated: 0,
     totalScenes: outlines.length,
   });
@@ -685,13 +917,36 @@ export async function generateClassroom(
       // gets the provider-bound AICallFn and the app injects its agentic PBL loop
       // as the classified fallback, preserving single-call → loop routing.
       const contentCall = await resolveSceneContentCall(safeOutline.type);
+      const suggestedImageIds = new Set(safeOutline.suggestedImageIds ?? []);
+      const assignedImages =
+        suggestedImageIds.size > 0
+          ? sortDocumentImagesForVision(
+              context.pdfImages.filter((image) => suggestedImageIds.has(image.id)),
+            )
+          : undefined;
+      const assignedImageMapping =
+        assignedImages && assignedImages.length > 0
+          ? Object.fromEntries(
+              assignedImages.flatMap((image) => {
+                const src = context.imageMapping[image.id];
+                return src ? [[image.id, src] as const] : [];
+              }),
+            )
+          : undefined;
       const content = await (async () => {
         try {
           return await withGenerationRetry(
             () =>
               generateSceneContent(safeOutline, contentCall.aiCall, {
+                assignedImages,
+                imageMapping: assignedImageMapping,
+                visionEnabled:
+                  contentCall.visionEnabled &&
+                  assignedImageMapping !== undefined &&
+                  Object.keys(assignedImageMapping).length > 0,
                 agents,
                 languageDirective,
+                userRequirements: context.requirements,
                 allowProceduralSkill: vocationalActive,
                 ...(safeOutline.type === 'pbl'
                   ? {

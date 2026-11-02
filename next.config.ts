@@ -43,7 +43,15 @@ const nextConfig: NextConfig = {
       // dependencies itself; including every native variant there bloats each
       // traced function and can push Hobby deployments past 12 bundles.
       ...(!isVercelBuild
-        ? ['node_modules/.pnpm/@img+sharp-libvips-*/node_modules/@img/sharp-libvips-*/lib/**']
+        ? [
+            'node_modules/.pnpm/@img+sharp-libvips-*/node_modules/@img/sharp-libvips-*/lib/**',
+            // Same shape of problem: the vision-OCR path rasterizes PDF pages
+            // through `@napi-rs/canvas` (see lib/pdf/vision-ocr.ts), which
+            // dlopens its platform binary. Next's own auto-external list covers
+            // `canvas`, not `@napi-rs/canvas`, so it is opted out below and the
+            // tracer cannot follow the native package on its own.
+            'node_modules/.pnpm/@napi-rs+canvas-*/node_modules/@napi-rs/canvas-*/**',
+          ]
         : []),
     ],
   },
@@ -69,6 +77,12 @@ const nextConfig: NextConfig = {
     // egress cannot resolve their SDK in the shipped deployment.
     '@aws-sdk/client-s3',
     '@aws-sdk/s3-request-presigner',
+    // Loaded through `import('@napi-rs/canvas')` from lib/pdf/vision-ocr.ts.
+    // Bundling it breaks the package's own lookup of its platform binary
+    // ("Cannot find native binding"), so PDF pages could not be rasterized for
+    // the vision model even though a plain `require` of the same package works
+    // outside the bundler.
+    '@napi-rs/canvas',
   ],
   experimental: {
     proxyClientMaxBodySize: '200mb',

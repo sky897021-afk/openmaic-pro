@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { patchHtmlForIframe } from '@/lib/utils/iframe';
 
 describe('patchHtmlForIframe', () => {
@@ -16,6 +16,40 @@ describe('patchHtmlForIframe', () => {
     const out = patchHtmlForIframe(html);
     // The shim must appear before the page's own <script> so storage is safe by then.
     expect(out.indexOf('data-iframe-storage-shim')).toBeLessThan(out.indexOf('window.__x'));
+  });
+
+  it('bridges the legacy launch function to startGame after the authored script', () => {
+    const out = patchHtmlForIframe(
+      '<html><head></head><body><button onclick="startGame()">Start</button><script>function launch() { window.started = true; }</script></body></html>',
+    );
+    const shim = out.match(/<script data-iframe-start-game-compat>([\s\S]*?)<\/script>/)?.[1];
+    expect(shim).toBeTruthy();
+    expect(out.indexOf('function launch()')).toBeLessThan(
+      out.indexOf('data-iframe-start-game-compat'),
+    );
+
+    const launch = vi.fn(() => 'started');
+    const win: Record<string, unknown> = { launch };
+    new Function('window', shim as string)(win);
+
+    expect((win.startGame as () => unknown)()).toBe('started');
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it('does not replace an existing startGame function', () => {
+    const out = patchHtmlForIframe(
+      '<html><head></head><body><script>function startGame() {}</script></body></html>',
+    );
+    const shim = out.match(/<script data-iframe-start-game-compat>([\s\S]*?)<\/script>/)?.[1];
+    expect(shim).toBeTruthy();
+
+    const startGame = vi.fn();
+    const launch = vi.fn();
+    const win: Record<string, unknown> = { startGame, launch };
+    new Function('window', shim as string)(win);
+
+    expect(win.startGame).toBe(startGame);
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it('the shim provides a working in-memory storage when the real one throws', () => {

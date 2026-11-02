@@ -1,4 +1,4 @@
-import { injectIntoDocumentHead } from './html-document';
+import { injectIntoDocumentBodyEnd, injectIntoDocumentHead } from './html-document';
 import {
   withObservationResponder,
   type ObservationIdentity,
@@ -372,6 +372,20 @@ const ELEMENT_PICKER_SHIM = `<script data-iframe-element-picker-shim>
 </script>`;
 
 /**
+ * Older generated games sometimes expose their start action as `launch()`
+ * while the authored button still calls `startGame()`. Keep that stored lesson
+ * playable without changing the sandbox or overriding a real `startGame`.
+ */
+const START_GAME_COMPAT_SHIM = `<script data-iframe-start-game-compat>
+(function () {
+  if (window.startGame !== undefined || typeof window.launch !== 'function') return;
+  window.startGame = function () {
+    return window.launch.apply(this, arguments);
+  };
+})();
+</script>`;
+
+/**
  * Patch embedded HTML to display correctly inside an iframe.
  *
  * Injects a runtime-error capture shim + a storage shim (so sandboxed pages that
@@ -405,7 +419,10 @@ export function patchHtmlForIframe(html: string, observation?: ObservationIdenti
   const injection =
     '\n' + ERROR_CAPTURE_SHIM + '\n' + ELEMENT_PICKER_SHIM + '\n' + STORAGE_SHIM + '\n' + iframeCss;
 
-  const patched = injectIntoDocumentHead(html, injection);
+  const patched = injectIntoDocumentBodyEnd(
+    injectIntoDocumentHead(html, injection),
+    START_GAME_COMPAT_SHIM,
+  );
   // Body end, not head: the reader captures the scope element as it installs.
   return observation ? withObservationResponder(patched, observation) : patched;
 }

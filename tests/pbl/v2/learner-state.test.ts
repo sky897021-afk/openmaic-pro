@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   applyLearnerState,
   extractLearnerState,
+  hasPBLDesignTemplateChanges,
   stripToDesignTemplate,
 } from '@/lib/pbl/v2/runtime/learner-state';
 import { emptyAssessment } from '@/lib/pbl/v2/operations/kernel/proficiency';
+import { normalizeProjectRuntime } from '@/lib/pbl/v2/operations/kernel/progress';
 import type { PBLProjectV2, PBLRuntimeEvent } from '@/lib/pbl/v2/types';
 
 type ProjectFieldBoundary = 'learner-state' | 'design-template' | 'transient';
@@ -103,6 +105,24 @@ function runtimeEvent(): PBLRuntimeEvent {
 }
 
 describe('PBL learner state split', () => {
+  it('does not treat runtime-only normalization as a design change', () => {
+    const project = makeProject();
+    const designBeforeNormalization = structuredClone(project);
+
+    expect(normalizeProjectRuntime(project)).toBe(true);
+    expect(project.milestones[0]!.microtasks[0]!.status).toBe('in_progress');
+    expect(hasPBLDesignTemplateChanges(designBeforeNormalization, project)).toBe(false);
+  });
+
+  it('treats normalization repairs that change the document structure as design changes', () => {
+    const project = makeProject({ threads: [] });
+    const designBeforeNormalization = structuredClone(project);
+
+    expect(normalizeProjectRuntime(project)).toBe(true);
+    expect(project.threads).toEqual([{ agentId: 'role-i', messages: [] }]);
+    expect(hasPBLDesignTemplateChanges(designBeforeNormalization, project)).toBe(true);
+  });
+
   it('round-trips learner-owned fields over a stripped design template', () => {
     const project = makeProject({
       uiPhase: 'completed',

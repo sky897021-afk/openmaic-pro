@@ -497,6 +497,46 @@ describe('generationComplete', () => {
     expect(useStageStore.getState().currentSceneId).toBe('fresh');
   });
 
+  it('does not overwrite a same-id Workspace scene with a stale disk Hero scene', async () => {
+    const heroScene = makeSlideScene('scene-p1', 1);
+    const workspaceScene = {
+      ...makeSlideScene('scene-p1', 1),
+      title: 'Workspace scene',
+    };
+    loadStageDataMock.mockResolvedValue({
+      stage: makeStage(),
+      scenes: [heroScene],
+      currentSceneId: 'scene-p1',
+      chats: [],
+    });
+    stageOutlinesGet.mockResolvedValue({
+      stageId: 'stage-1',
+      outlines: [makeOutline(1)],
+      generationComplete: true,
+    });
+    let resolveHydration!: (scenes: Scene[]) => void;
+    hydratePBLScenesFromRuntimeMock.mockImplementation(
+      async () =>
+        new Promise<Scene[]>((resolve) => {
+          resolveHydration = resolve;
+        }),
+    );
+
+    const load = useStageStore.getState().loadFromStorage('stage-1');
+    await vi.waitFor(() => expect(hydratePBLScenesFromRuntimeMock).toHaveBeenCalled());
+    useStageStore.setState({
+      stage: makeStage(),
+      scenes: [workspaceScene],
+      currentSceneId: 'scene-p1',
+    });
+    resolveHydration([heroScene]);
+    await load;
+
+    expect(useStageStore.getState().stage?.id).toBe('stage-1');
+    expect(useStageStore.getState().scenes).toEqual([workspaceScene]);
+    expect(useStageStore.getState().currentSceneId).toBe('scene-p1');
+  });
+
   it('does not overwrite a different stage that appears while runtime hydration is pending', async () => {
     const diskScene = makeSlideScene('disk-a', 1, 'stage-a');
     const freshScene = makeSlideScene('fresh-b', 1, 'stage-b');

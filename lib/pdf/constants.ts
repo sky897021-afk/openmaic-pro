@@ -43,6 +43,19 @@ export const PDF_PROVIDERS: Record<PDFProviderId, PDFProviderConfig> = {
     icon: '/logos/aliyun.svg',
     features: ['text', 'images', 'tables', 'formulas', 'layout-analysis', 'ocr'],
   },
+
+  // Local first pass (unpdf text layer), then a vision model for the pages that
+  // have no text. `requiresApiKey: false` because credentials are optional: a
+  // request may carry its own model/endpoint/key, and otherwise the call falls
+  // back to the server-managed model — so this provider must NOT be rejected by
+  // parsePDF's requiresApiKey gate when nothing is filled in. Listed last so it
+  // never displaces unpdf as the default.
+  'vision-ocr': {
+    id: 'vision-ocr',
+    name: 'Vision OCR',
+    requiresApiKey: false,
+    features: ['text', 'images', 'tables', 'formulas', 'ocr'],
+  },
 };
 
 /**

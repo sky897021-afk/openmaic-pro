@@ -8,8 +8,10 @@ import type {
 } from '@/lib/server/classroom-generation';
 import {
   CLASSROOM_JOBS_DIR,
+  ClassroomAlreadyExistsError,
   ensureClassroomJobsDir,
   writeJsonFileAtomic,
+  writeJsonFileExclusive,
 } from '@/lib/server/classroom-storage';
 
 export type ClassroomGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
@@ -52,7 +54,8 @@ function buildInputSummary(input: GenerateClassroomInput): ClassroomGenerationJo
       input.requirement.length > 200 ? `${input.requirement.slice(0, 197)}...` : input.requirement,
     hasPdf: !!input.pdfContent,
     pdfTextLength: input.pdfContent?.text.length || 0,
-    pdfImageCount: input.pdfContent?.images.length || 0,
+    pdfImageCount:
+      input.pdfContent?.pdfImages?.length ?? input.pdfContent?.images.length ?? 0,
   };
 }
 
@@ -99,12 +102,9 @@ export function isValidClassroomJobId(jobId: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(jobId);
 }
 
-export async function createClassroomGenerationJob(
-  jobId: string,
-  input: GenerateClassroomInput,
-): Promise<ClassroomGenerationJob> {
+function buildQueuedJob(jobId: string, input: GenerateClassroomInput): ClassroomGenerationJob {
   const now = new Date().toISOString();
-  const job: ClassroomGenerationJob = {
+  return {
     id: jobId,
     status: 'queued',
     step: 'queued',
@@ -115,10 +115,53 @@ export async function createClassroomGenerationJob(
     inputSummary: buildInputSummary(input),
     scenesGenerated: 0,
   };
+}
+
+export async function createClassroomGenerationJob(
+  jobId: string,
+  input: GenerateClassroomInput,
+): Promise<ClassroomGenerationJob> {
+  const job = buildQueuedJob(jobId, input);
 
   await ensureClassroomJobsDir();
   await writeJsonFileAtomic(jobFilePath(jobId), job);
   return job;
+}
+
+export interface ClassroomGenerationJobCreation {
+  job: ClassroomGenerationJob;
+  created: boolean;
+}
+
+/**
+ * Atomically claim an idempotency-derived job id.
+ *
+ * A plain read-then-write lets two concurrent POSTs both observe "missing" and
+ * both schedule the pipeline. The exclusive create makes exactly one request
+ * the owner; every other caller receives the job that won.
+ */
+export async function createClassroomGenerationJobIfAbsent(
+  jobId: string,
+  input: GenerateClassroomInput,
+): Promise<ClassroomGenerationJobCreation> {
+  const job = buildQueuedJob(jobId, input);
+
+  await ensureClassroomJobsDir();
+  try {
+    await writeJsonFileExclusive(jobFilePath(jobId), job);
+    return { job, created: true };
+  } catch (error) {
+    if (
+      !(error instanceof ClassroomAlreadyExistsError) &&
+      (error as NodeJS.ErrnoException).code !== 'EEXIST'
+    ) {
+      throw error;
+    }
+
+    const existing = await readClassroomGenerationJob(jobId);
+    if (!existing) throw error;
+    return { job: existing, created: false };
+  }
 }
 
 export async function readClassroomGenerationJob(
